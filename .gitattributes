@@ -1,0 +1,23 @@
+# Normalize line endings across Windows/WSL to avoid ^M diffs.
+* text=auto eol=lf
+
+# Shell scripts must be LF
+*.sh text eol=lf
+
+# Python / configs must be LF
+*.py text eol=lf
+*.proto text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.toml text eol=lf
+
+# Docs/binaries - treat as binary to avoid line ending filters
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
