@@ -81,7 +81,7 @@ start_router_bridge() {
         echo "✅ RouterBridge启动成功 (PID: $pid)"
         return 0
     else
-        echo "❌ RouterBridge启动失败，查看日志: tail -f $LOG_DIR/router_bridge.log"
+        echo "❌ RouterBridge启动失败,查看日志: tail -f $LOG_DIR/router_bridge.log"
         return 1
     fi
 }
@@ -104,7 +104,7 @@ start_agent_system() {
         echo "✅ Agent系统启动成功 (PID: $pid)"
         return 0
     else
-        echo "❌ Agent系统启动失败，查看日志: tail -f $LOG_DIR/agent_system.log"
+        echo "❌ Agent系统启动失败,查看日志: tail -f $LOG_DIR/agent_system.log"
         return 1
     fi
 }
