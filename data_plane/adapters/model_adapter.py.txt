@@ -1,0 +1,33 @@
+# D:\RD\ai-os\data_plane\adapters\model_adapter.py
+import asyncio
+import logging
+from typing import Any, Dict
+
+logger = logging.getLogger("ModelAdapter")
+
+
+class ModelAdapter:
+    """
+    统一模型执行入口
+    默认调用你现有 deepseek_service.deepseek_service.generate_text（同步），用线程池执行避免阻塞事件循环
+    """
+
+    def __init__(self):
+        # 延迟导入，避免启动期循环依赖
+        from server.deepseek_service import deepseek_service  # 按你的实际模块路径调整
+        self.deepseek_service = deepseek_service
+
+    async def execute(self, execution_envelope: Dict[str, Any]) -> Dict[str, Any]:
+        inp = execution_envelope.get("input", {}) or {}
+        prompt = inp.get("user_message") or inp.get("content") or ""
+
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, self.deepseek_service.generate_text, prompt)
+
+        # 统一返回结构
+        return {
+            "success": bool(result.get("success")),
+            "content": result.get("content", ""),
+            "metrics": result.get("metrics", {}),
+            "fallback": result.get("fallback", False),
+        }

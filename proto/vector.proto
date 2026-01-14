@@ -1,0 +1,266 @@
+﻿syntax = "proto3";
+
+package ai.os.vector;
+
+import "envelope.proto";
+
+option go_package = "aios/vector";
+option java_package = "com.aios.vector";
+
+// ========== 标准化向量 ==========
+message Vector {
+  string id = 1;
+  repeated float values = 2;
+  map<string, string> metadata = 3;
+  string tenant_id = 4; // 🎯 新增租户ID
+  VectorMetadata vector_metadata = 5; // 🎯 新增向量元数据
+  string content_hash = 6; // 🎯 新增内容哈希
+}
+
+// ========== 向量元数据 ==========
+message VectorMetadata {
+  string created_at = 1;
+  string updated_at = 2;
+  string source = 3; // 数据来源
+  string model_used = 4; // 使用的模型
+  int32 dimension = 5; // 向量维度
+  string data_type = 6; // 数据类型
+  double confidence_score = 7; // 置信度得分
+  map<string, string> custom_metadata = 8;
+}
+
+// ========== 标准化写入请求 ==========
+message WriteRequest {
+  repeated Vector vectors = 1;
+  string namespace = 2;
+  string tenant_id = 3; // 🎯 新增租户ID
+  WriteOptions options = 4; // 🎯 新增写入选项
+  ai.os.envelope.StandardMetadata metadata = 5; // 🎯 新增标准化metadata
+}
+
+// ========== 写入选项 ==========
+message WriteOptions {
+  bool overwrite = 1; // 是否覆盖已存在的向量
+  int32 batch_size = 2; // 批处理大小
+  string consistency_level = 3; // 一致性级别
+  int32 timeout_seconds = 4; // 超时时间
+  map<string, string> custom_options = 5;
+}
+
+// ========== 标准化搜索请求 ==========
+message SearchRequest {
+  repeated float query = 1;
+  int32 top_k = 2;
+  string namespace = 3;
+  string tenant_id = 4; // 🎯 新增租户ID
+  SearchOptions options = 5; // 🎯 新增搜索选项
+  FilterConditions filters = 6; // 🎯 新增过滤条件
+  ai.os.envelope.StandardMetadata metadata = 7; // 🎯 新增标准化metadata
+}
+
+// ========== 搜索选项 ==========
+message SearchOptions {
+  string distance_metric = 1; // cosine, euclidean, dotproduct
+  bool include_vectors = 2; // 是否返回向量
+  bool include_metadata = 3; // 是否返回元数据
+  double score_threshold = 4; // 分数阈值
+  map<string, string> custom_options = 5;
+}
+
+// ========== 过滤条件 ==========
+message FilterConditions {
+  map<string, string> metadata_filters = 1; // 元数据过滤
+  repeated string id_filters = 2; // ID过滤
+  string date_range = 3; // 日期范围
+  string custom_filter_query = 4; // 自定义过滤查询
+  map<string, string> range_filters = 5; // 范围过滤
+}
+
+// ========== 标准化搜索结果 ==========
+message SearchResult {
+  string id = 1;
+  float score = 2;
+  map<string, string> metadata = 3;
+  string tenant_id = 4; // 🎯 新增租户ID
+  repeated float vector = 5; // 🎯 新增向量值
+  ResultMetadata result_metadata = 6; // 🎯 新增结果元数据
+}
+
+// ========== 结果元数据 ==========
+message ResultMetadata {
+  string search_time = 1; // 搜索时间
+  int32 total_candidates = 2; // 总候选数
+  string algorithm_used = 3; // 使用的算法
+  map<string, string> performance_metrics = 4; // 性能指标
+}
+
+// ========== 标准化聚类请求 ==========
+message ClusterRequest {
+  string namespace = 1;
+  int32 num_clusters = 2;
+  string tenant_id = 3; // 🎯 新增租户ID
+  ClusteringOptions options = 4; // 🎯 新增聚类选项
+  ai.os.envelope.StandardMetadata metadata = 5; // 🎯 新增标准化metadata
+}
+
+// ========== 聚类选项 ==========
+message ClusteringOptions {
+  string algorithm = 1; // kmeans, dbscan, hierarchical
+  int32 max_iterations = 2; // 最大迭代次数
+  double tolerance = 3; // 容忍度
+  string distance_metric = 4; // 距离度量
+  map<string, string> custom_options = 5;
+}
+
+// ========== 聚类结果 ==========
+message ClusterResult {
+  string cluster_id = 1;
+  repeated string vector_ids = 2; // 向量ID列表
+  repeated float centroid = 3; // 聚类中心
+  double inertia = 4; // 惯性值
+  int32 size = 5; // 聚类大小
+  map<string, string> cluster_metadata = 6; // 聚类元数据
+  string tenant_id = 7; // 🎯 新增租户ID
+}
+
+// ========== 索引统计信息 ==========
+message IndexStats {
+  string namespace = 1;
+  int32 total_vectors = 2;
+  int32 dimension = 3;
+  string index_type = 4;
+  double memory_usage = 5; // 内存使用量
+  string last_updated = 6; // 最后更新时间
+  map<string, string> performance_metrics = 7; // 性能指标
+  string tenant_id = 8; // 🎯 新增租户ID
+}
+
+// ========== 批量操作请求 ==========
+message BatchOperationRequest {
+  repeated WriteRequest write_requests = 1;
+  repeated SearchRequest search_requests = 2;
+  string operation_id = 3;
+  string tenant_id = 4;
+  BatchOptions options = 5;
+}
+
+// ========== 批量操作选项 ==========
+message BatchOptions {
+  bool parallel_execution = 1; // 是否并行执行
+  int32 max_concurrent = 2; // 最大并发数
+  string consistency_level = 3; // 一致性级别
+  map<string, string> custom_options = 4;
+}
+
+// ========== 批量操作响应 ==========
+message BatchOperationResponse {
+  repeated WriteResponse write_responses = 1;
+  repeated SearchResponse search_responses = 2;
+  string operation_id = 3;
+  BatchMetrics metrics = 4;
+  string tenant_id = 5;
+}
+
+// ========== 写入响应 ==========
+message WriteResponse {
+  string namespace = 1;
+  int32 successful_writes = 2;
+  int32 failed_writes = 3;
+  repeated string written_ids = 4; // 写入的ID列表
+  map<string, string> write_metrics = 5; // 写入指标
+}
+
+// ========== 搜索响应 ==========
+message SearchResponse {
+  string namespace = 1;
+  repeated SearchResult results = 2;
+  SearchMetrics metrics = 3; // 搜索指标
+}
+
+// ========== 批量操作指标 ==========
+message BatchMetrics {
+  int32 total_operations = 1;
+  int32 completed_operations = 2;
+  int32 failed_operations = 3;
+  double total_processing_time = 4;
+  double avg_operation_time = 5;
+  map<string, string> custom_metrics = 6;
+}
+
+// ========== 搜索指标 ==========
+message SearchMetrics {
+  double search_time = 1; // 搜索时间
+  int32 total_candidates = 2; // 总候选数
+  double avg_score = 3; // 平均得分
+  string algorithm_used = 4; // 使用的算法
+  map<string, string> custom_metrics = 5;
+}
+
+service VectorService {
+  rpc Write(WriteRequest) returns (ai.os.envelope.Envelope);
+  rpc Search(SearchRequest) returns (stream SearchResult);
+  rpc Cluster(ClusterRequest) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增标准化接口
+  rpc BatchOperation(BatchOperationRequest) returns (BatchOperationResponse);
+  rpc GetIndexStats(IndexStatsRequest) returns (IndexStats);
+  rpc DeleteVectors(DeleteRequest) returns (ai.os.envelope.Envelope);
+  rpc UpdateVectorMetadata(UpdateMetadataRequest) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增管理接口
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+  rpc OptimizeIndex(OptimizeRequest) returns (ai.os.envelope.Envelope);
+}
+
+// ========== 索引统计请求 ==========
+message IndexStatsRequest {
+  string namespace = 1;
+  string tenant_id = 2;
+  bool include_detailed_metrics = 3; // 是否包含详细指标
+}
+
+// ========== 删除请求 ==========
+message DeleteRequest {
+  repeated string vector_ids = 1;
+  string namespace = 2;
+  string tenant_id = 3;
+  DeleteOptions options = 4;
+}
+
+// ========== 删除选项 ==========
+message DeleteOptions {
+  bool soft_delete = 1; // 软删除
+  string deletion_reason = 2; // 删除原因
+  map<string, string> custom_options = 3;
+}
+
+// ========== 更新元数据请求 ==========
+message UpdateMetadataRequest {
+  string vector_id = 1;
+  string namespace = 2;
+  string tenant_id = 3;
+  map<string, string> new_metadata = 4;
+  UpdateOptions options = 5;
+}
+
+// ========== 更新选项 ==========
+message UpdateOptions {
+  bool merge_metadata = 1; // 是否合并元数据
+  repeated string fields_to_remove = 2; // 要删除的字段
+  map<string, string> custom_options = 3;
+}
+
+// ========== 优化请求 ==========
+message OptimizeRequest {
+  string namespace = 1;
+  string tenant_id = 2;
+  OptimizeOptions options = 3;
+}
+
+// ========== 优化选项 ==========
+message OptimizeOptions {
+  string optimization_type = 1; // rebuild, compact, reindex
+  int32 target_segments = 2; // 目标段数
+  bool force_optimization = 3; // 强制优化
+  map<string, string> custom_options = 4;
+}

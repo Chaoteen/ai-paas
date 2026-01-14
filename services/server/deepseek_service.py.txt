@@ -1,0 +1,57 @@
+# deepseek_service.py
+import requests
+import threading
+import asyncio
+
+class DeepSeekService:
+    def __init__(self, bus, model_url="http://127.0.0.1:11434/api/generate", model_name="deepseek-r1:14b"):
+        self.bus = bus
+        self.model_url = model_url
+        self.model_name = model_name
+        print(f"[DeepSeekService] ✅ Ready model: {model_name}")
+        self.bus.subscribe("agent.task", self.on_task)
+
+    def on_task(self, data):
+        # 可以根据需要添加模型过滤逻辑
+        # if data.get("model") != "deepseek":
+        #     return  # 只处理发给deepseek的任务
+        
+        # 或者处理所有任务（与ModelService类似）
+        task_id = data.get("task_id")
+        content = data.get("content")
+        print(f"[DeepSeekService] 🧩 Received task {task_id}: {content}")
+        
+        threading.Thread(target=self.handle_task, args=(task_id, content)).start()
+
+    def handle_task(self, task_id, content):
+        """调用本地 DeepSeek 模型"""
+        payload = {
+            "model": self.model_name,
+            "prompt": content,
+            "stream": False
+        }
+        
+        try:
+            response = requests.post(self.model_url, json=payload, timeout=120)
+            if response.status_code == 200:
+                result_data = response.json()
+                result = result_data.get("response", "")
+                print(f"[DeepSeekService] ✅ Output for {task_id}: {result[:80]}...")
+            else:
+                result = f"❌ HTTP Error: {response.status_code} - {response.text}"
+                print(f"[DeepSeekService] ❌ {result}")
+                
+        except Exception as e:
+            result = f"❌ Error calling DeepSeek model: {e}"
+            print(f"[DeepSeekService] ❌ {result}")
+
+        # 发布结果到总线
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(
+                self.bus.publish("agent.result", {"task_id": task_id, "result": result})
+            )
+            loop.close()
+        except Exception as e:
+            print(f"[DeepSeekService] ❌ Failed to publish result: {e}")

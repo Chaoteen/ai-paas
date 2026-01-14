@@ -1,0 +1,121 @@
+syntax = "proto3";
+package ai.os.envelope;
+
+option go_package = "aios/envelope";
+option java_package = "com.aios.envelope";
+
+// ========== 用户配置 ==========
+message UserProfile {
+  string user_id = 1;
+  string tenant_id = 2;
+  string department = 3;
+  string role = 4;
+  repeated string permissions = 5;
+}
+
+// ========== 模型策略 ==========
+message ModelPolicy {
+  string default_model = 1;
+  string fallback_model = 2;
+  repeated string allowed_models = 3;
+  int32 max_tokens = 4;
+  double temperature = 5;
+}
+
+// ========== Agent配置 ==========
+message AgentProfile {
+  repeated string subscribed_agents = 1;
+  string routing_policy = 2;
+  ModelPolicy model_policy = 3;
+  map<string, string> agent_configs = 4;
+}
+
+// ========== 会话上下文 ==========
+message SessionContext {
+  int32 context_window = 1;
+  string memory_policy = 2;
+  repeated string enabled_features = 3;
+  map<string, string> session_params = 4;
+}
+
+// ========== 标准元数据 ==========
+message StandardMetadata {
+  // 用户信息
+  UserProfile user_profile = 1;
+  
+  // Agent配置
+  AgentProfile agent_profile = 2;
+  
+  // 会话上下文
+  SessionContext session_context = 3;
+  
+  // 系统信息
+  string request_id = 4;
+  string timestamp = 5;
+  string source_service = 6;
+  string target_service = 7;
+  string correlation_id = 8;
+  map<string, string> headers = 9;
+  string version = 10;
+}
+
+// ========== 标准信封 ==========
+message Envelope {
+  string message_id = 1;
+  string message_type = 2;
+  bytes payload = 3;
+  StandardMetadata metadata = 4;
+  string signature = 5;
+}
+
+// ========== 通用响应 ==========
+message StandardResponse {
+  bool success = 1;
+  string message = 2;
+  string error_code = 3;
+  string trace_id = 4;
+  map<string, string> details = 5;
+}
+// ========== 缺失类型定义 ==========
+
+// Token使用情况
+message TokenUsage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+  double estimated_cost = 4;
+}
+
+// 记忆项
+message MemoryItem {
+  string id = 1;
+  string session_id = 2;
+  string content = 3;
+  string type = 4;
+  string timestamp = 5;
+  double relevance_score = 6;
+  map<string, string> metadata = 7;
+}
+
+// 检索文档
+message RetrievedDocument {
+  string id = 1;
+  string content = 2;
+  string source = 3;
+  double similarity_score = 4;
+  map<string, string> metadata = 5;
+  repeated string keywords = 6;
+}
+
+// ========== 基本类型包装消息 ==========
+message StringValue {
+  string value = 1;
+}
+
+message BoolValue {
+  bool value = 1;
+}
+
+message Int32Value {
+  int32 value = 1;
+}

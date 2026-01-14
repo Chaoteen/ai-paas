@@ -1,0 +1,114 @@
+# ai-os/data_plane/adapters/redis_stream_adapter.py
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from typing import Any, Dict, Optional
+
+import redis.asyncio as redis
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+class RedisStreamAdapter:
+    """
+    标准化 Redis Streams 适配器（同步等待）
+    - publish_envelope -> 写入指定 stream
+    - wait_result      -> 轮询/阻塞读取 result stream，按 request_id/envelope_id 匹配
+    """
+
+    def __init__(
+        self,
+        redis_url: str = "redis://localhost:6379",
+        request_stream: str = "agent.tasks.stream",
+        result_stream: str = "agent.result.stream",
+    ):
+        self.redis_url = redis_url
+        self.request_stream = request_stream
+        self.result_stream = result_stream
+        self.redis: Optional[redis.Redis] = None
+
+    async def start(self):
+        if self.redis is None:
+            self.redis = redis.from_url(self.redis_url, decode_responses=True)
+            logger.info("[RedisStreamAdapter] connected redis=%s", self.redis_url)
+
+    async def close(self):
+        if self.redis is not None:
+            await self.redis.aclose()
+            self.redis = None
+
+    async def publish_envelope(self, envelope: Dict[str, Any]) -> str:
+        if not self.redis:
+            raise RuntimeError("RedisStreamAdapter not started")
+
+        msg_id = await self.redis.xadd(
+            self.request_stream,
+            {"message": json.dumps(envelope)},
+            maxlen=10000,
+        )
+        return str(msg_id)
+
+    async def wait_result(
+        self,
+        match: Dict[str, str],
+        timeout_s: float = 15.0,
+        block_ms: int = 2000,
+    ) -> Dict[str, Any]:
+        """
+        match: {"request_id": "...", "envelope_id": "..."} 任意组合（至少一个）
+        """
+        if not self.redis:
+            raise RuntimeError("RedisStreamAdapter not started")
+
+        if not match.get("request_id") and not match.get("envelope_id"):
+            raise ValueError("wait_result requires request_id or envelope_id")
+
+        start = time.time()
+        last_id = "0-0"
+
+        while True:
+            elapsed = time.time() - start
+            if elapsed >= timeout_s:
+                raise TimeoutError(f"wait_result timeout after {timeout_s}s")
+
+            # 阻塞读取
+            res = await self.redis.xread(
+                streams={self.result_stream: last_id},
+                count=50,
+                block=block_ms,
+            )
+
+            if not res:
+                continue
+
+            for _stream, entries in res:
+                for msg_id, fields in entries:
+                    last_id = msg_id
+                    raw = fields.get("message")
+                    if not raw:
+                        continue
+
+                    try:
+                        obj = json.loads(raw)
+                    except Exception:
+                        # 有些实现直接把dict散字段写入stream，这里做兼容
+                        obj = fields
+
+                    if self._match_result(obj, match):
+                        return obj
+
+    @staticmethod
+    def _match_result(obj: Dict[str, Any], match: Dict[str, str]) -> bool:
+        rid = match.get("request_id")
+        eid = match.get("envelope_id")
+        if rid and obj.get("request_id") != rid:
+            return False
+        if eid and obj.get("envelope_id") != eid and obj.get("envelope_id") is not None:
+            return False
+        # 兼容你现有 result 里只带 session_id/task_id 的情况：允许 envelope_id 缺失
+        return True

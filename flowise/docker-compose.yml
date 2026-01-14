@@ -1,0 +1,9 @@
+services:
+  flowise:
+    image: flowiseai/flowise:latest
+    container_name: aios_flowise
+    ports:
+      - "3000:3000"
+    environment:
+      - FLOWISE_USERNAME=admin
+      - FLOWISE_PASSWORD=admin123

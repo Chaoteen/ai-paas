@@ -42,3 +42,59 @@ conda-bld/
 
 # Local data (if any)
 data/
+
+# --- AI PaaS project excludes (local/runtime) ---
+# Runtime dirs
+logs/
+pids/
+data/
+env/
+
+# Flowise runtime data (keep config, ignore data)
+flowise/data/
+flowise/.env
+
+# Promptflow runtime (if any)
+promptflow/.env
+promptflow/.promptflow/
+
+# Local PID files
+*.pid
+
+# Patches/rejects/backups
+*.rej
+*.orig
+*.backup
+
+# Large/binary artifacts (keep only if you really need them versioned)
+*.deb
+*.csv
+*.xlsx
+
+# Office docs temp files
+~$*.docx
+
+# --- Additional ignores after migration review ---
+# Ignore promptflow run artifacts anywhere
+**/.promptflow/
+**/.promptflow/**
+
+# Ignore generic backup files
+*.bak
+*.backup
+*.old
+*.swp
+
+# Ignore generated SDK backups/history
+aios_sdk/backup/
+aios_sdk/backup/**
+aios_sdk/**/backup/
+aios_sdk/**/backup/**
+aios_sdk/**/generated_old/
+aios_sdk/**/generated_old/**
+
+# Ignore accidental dot-txt file
+proto/.txt
+
+# Ignore historical/manual backup files with 'bak' in name
+*bak*

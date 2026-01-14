@@ -1,0 +1,128 @@
+Redis Bridge的作用
+路由桥接的核心功能：
+python
+# 路由桥接的数据流
+agent.task (Stream) → Router Bridge → agent.tasks.stream (Stream)
+     ↑                          ↑
+ (外部请求)                 (内部工作者)
+具体作用：
+
+协议转换：将外部请求格式转换为内部处理格式
+
+消息路由：根据消息内容路由到不同的模型频道
+
+流量控制：缓冲突发流量，保护后端工作者
+
+错误隔离：防止错误请求影响整个系统
+
+实际场景：
+python
+# 如果没有路由桥接：
+Client → agent.task → 所有工作者同时处理同一消息
+
+# 有了路由桥接：  
+Client → agent.task → Router → 特定模型Stream → 对应工作者
+🌉 Redis Stream打通的消息连接
+系统间消息连接：
+text
+外部系统/API → 控制平面 → 数据平面 → 模型服务 → 返回结果
+    ↑              ↑           ↑          ↑
+ (HTTP/gRPC)   (Agent管理)  (消息总线)  (模型推理)
+具体打通环节：
+控制面 ↔ 数据面
+
+AgentManager → ModelService
+
+任务调度 → 任务执行
+
+水平扩展的工作者
+
+多个ModelService实例
+
+负载均衡和容错
+
+异步处理链路
+
+请求 → 处理 → 响应 的完整异步流程
+
+多租户隔离
+
+不同用户/任务的消息路由
+
+🏗️ Redis分布式部署能力
+Redis集群支持：
+python
+# Redis集群配置
+REDIS_CLUSTER = [
+    {"host": "redis-node1", "port": 6379},
+    {"host": "redis-node2", "port": 6380}, 
+    {"host": "redis-node3", "port": 6381}
+]
+
+# Streams在集群中的分布
+- agent.task → 可能分布在node1
+- agent.tasks.stream → 可能分布在node2  
+- agent.result → 可能分布在node3
+分布式部署方案：
+方案A：Redis Cluster（推荐）
+bash
+# 6节点集群（3主3从）
+redis-cli --cluster create \
+  192.168.1.10:6379 192.168.1.11:6379 192.168.1.12:6379 \
+  192.168.1.13:6379 192.168.1.14:6379 192.168.1.15:6379 \
+  --cluster-replicas 1
+方案B：Redis Sentinel
+bash
+# 哨兵模式监控主从
+sentinel monitor mymaster 192.168.1.10 6379 2
+sentinel down-after-milliseconds mymaster 5000
+代码层面的集群适配：
+python
+import redis.asyncio as redis
+from redis.cluster import RedisCluster
+
+# 集群连接
+async def create_cluster_client():
+    return RedisCluster(
+        startup_nodes=[
+            {"host": "redis-node1", "port": 6379},
+            {"host": "redis-node2", "port": 6379},
+        ],
+        decode_responses=True
+    )
+
+# Stream操作在集群中自动分片
+await cluster_client.xadd("agent.task", message_data)  # 自动路由到正确节点
+生产级考虑：
+1. 数据分片策略
+python
+# 基于业务键的分片
+def get_shard_key(task_id: str) -> str:
+    return f"agent.task.shard.{hash(task_id) % 16}"
+
+# 或者基于用户的分片  
+def get_user_shard(user_id: str) -> str:
+    return f"agent.task.user.{user_id}"
+2. 高可用性
+python
+# 故障转移处理
+try:
+    await redis_client.xadd(stream, message)
+except redis.ConnectionError:
+    # 自动重连或切换到备用节点
+    await handle_redis_failure()
+3. 监控和扩缩容
+bash
+# 集群状态监控
+redis-cli --cluster check redis-node1:6379
+
+# 动态添加节点
+redis-cli --cluster add-node new-node:6379 existing-node:6379
+🎯 总结
+Redis Bridge：是系统的"交通警察"，负责消息路由和流量管理
+
+Stream连接：打通了控制平面、数据平面、模型服务之间的异步通信
+
+分布式能力：Redis完全支持分布式部署，可以通过Cluster或Sentinel实现高可用、水平扩展的部署方案
+
+

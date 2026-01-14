@@ -1,0 +1,17 @@
+$schema: https://azuremlschemas.azureedge.net/promptflow/latest/Flow.schema.json
+inputs:
+  name:
+    type: string
+    default: "World"
+outputs:
+  greeting:
+    type: string
+    reference: ${greet_node.output}
+nodes:
+- name: greet_node
+  type: python
+  source:
+    type: code
+    path: greet.py
+  inputs:
+    name: ${inputs.name}

@@ -1,0 +1,205 @@
+﻿syntax = "proto3";
+
+package ai.os.prompt;
+
+import "envelope.proto";
+
+option go_package = "aios/prompt";
+option java_package = "com.aios.prompt";
+
+// ========== 标准化提示词模板 ==========
+message PromptTemplate {
+  string id = 1;
+  string name = 2;
+  string template = 3;
+  map<string, string> parameters = 4;
+  string version = 5;
+  string tenant_id = 6; // 🎯 新增租户ID
+  TemplateMetadata metadata = 7; // 🎯 新增模板元数据
+  repeated TemplateVariable variables = 8; // 🎯 新增变量定义
+  QualityMetrics quality_metrics = 9; // 🎯 新增质量指标
+}
+
+// ========== 模板元数据 ==========
+message TemplateMetadata {
+  string created_by = 1;
+  string created_at = 2;
+  string updated_by = 3;
+  string updated_at = 4;
+  string description = 5;
+  repeated string tags = 6;
+  string category = 7; // 分类
+  string language = 8; // 语言
+  int32 usage_count = 9; // 使用次数
+  map<string, string> custom_metadata = 10;
+}
+
+// ========== 模板变量 ==========
+message TemplateVariable {
+  string name = 1;
+  string type = 2; // string, number, boolean, list, object
+  string description = 3;
+  bool required = 4;
+  string default_value = 5;
+  repeated string allowed_values = 6;
+  ValidationRule validation = 7; // 验证规则
+}
+
+// ========== 验证规则 ==========
+message ValidationRule {
+  string rule_type = 1; // regex, range, length, custom
+  string pattern = 2;
+  string min_value = 3;
+  string max_value = 4;
+  string error_message = 5;
+  map<string, string> custom_rules = 6;
+}
+
+// ========== 质量指标 ==========
+message QualityMetrics {
+  double clarity_score = 1; // 清晰度得分
+  double effectiveness_score = 2; // 有效性得分
+  double consistency_score = 3; // 一致性得分
+  int32 test_count = 4; // 测试次数
+  double avg_test_score = 5; // 平均测试得分
+  map<string, string> custom_metrics = 6;
+}
+
+// ========== 标准化测试提示词请求 ==========
+message TestPromptRequest {
+  string template_id = 1;
+  map<string, string> input_values = 2;
+  string tenant_id = 3; // 🎯 新增租户ID
+  TestConfiguration config = 4; // 🎯 新增测试配置
+  ai.os.envelope.StandardMetadata metadata = 5; // 🎯 新增标准化metadata
+}
+
+// ========== 测试配置 ==========
+message TestConfiguration {
+  string model_id = 1; // 使用的模型
+  double temperature = 2;
+  int32 max_tokens = 3;
+  bool include_metrics = 4; // 是否包含指标
+  repeated string evaluation_criteria = 5; // 评估标准
+  map<string, string> custom_config = 6;
+}
+
+// ========== 标准化测试提示词响应 ==========
+message TestPromptResponse {
+  string generated_output = 1;
+  double score = 2;
+  string tenant_id = 3; // 🎯 新增租户ID
+  TestMetrics metrics = 4; // 🎯 新增测试指标
+  repeated EvaluationResult evaluations = 5; // 🎯 新增评估结果
+  string test_id = 6; // 🎯 新增测试ID
+}
+
+// ========== 测试指标 ==========
+message TestMetrics {
+  double processing_time = 1; // 处理时间
+  int32 token_count = 2; // token数量
+  double cost_estimate = 3; // 成本估算
+  map<string, string> model_metrics = 4; // 模型指标
+}
+
+// ========== 评估结果 ==========
+message EvaluationResult {
+  string criterion = 1; // 评估标准
+  double score = 2; // 得分
+  string feedback = 3; // 反馈
+  string evaluator = 4; // 评估者
+  map<string, string> details = 5; // 详细信息
+}
+
+// ========== 提示词版本历史 ==========
+message PromptVersion {
+  string template_id = 1;
+  string version = 2;
+  string content = 3;
+  string created_by = 4;
+  string created_at = 5;
+  string change_description = 6;
+  QualityMetrics metrics = 7;
+  map<string, string> metadata = 8;
+}
+
+// ========== 批量测试请求 ==========
+message BatchTestRequest {
+  repeated TestPromptRequest requests = 1;
+  string batch_id = 2;
+  string tenant_id = 3;
+  BatchTestConfig config = 4;
+}
+
+// ========== 批量测试配置 ==========
+message BatchTestConfig {
+  bool parallel_execution = 1; // 是否并行执行
+  int32 max_concurrent = 2; // 最大并发数
+  string result_aggregation = 3; // 结果聚合方式
+  map<string, string> custom_config = 4;
+}
+
+// ========== 批量测试响应 ==========
+message BatchTestResponse {
+  repeated TestPromptResponse responses = 1;
+  string batch_id = 2;
+  BatchTestMetrics metrics = 3;
+  string tenant_id = 4;
+}
+
+// ========== 批量测试指标 ==========
+message BatchTestMetrics {
+  int32 total_tests = 1;
+  int32 completed_tests = 2;
+  int32 failed_tests = 3;
+  double total_processing_time = 4;
+  double avg_score = 5;
+  map<string, string> custom_metrics = 6;
+}
+
+service PromptService {
+  rpc RegisterTemplate(PromptTemplate) returns (ai.os.envelope.Envelope);
+  rpc TestPrompt(TestPromptRequest) returns (TestPromptResponse);
+  rpc ListTemplates(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增标准化接口
+  rpc BatchTestPrompt(BatchTestRequest) returns (BatchTestResponse);
+  rpc GetTemplateVersions(ai.os.envelope.StringValue) returns (stream PromptVersion); // template_id
+  rpc CompareTemplates(TemplateCompareRequest) returns (TemplateCompareResponse);
+  rpc UpdateTemplateMetrics(PromptTemplate) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增管理接口
+  rpc SearchTemplates(TemplateSearchRequest) returns (stream PromptTemplate);
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}
+
+// ========== 模板比较请求 ==========
+message TemplateCompareRequest {
+  string template_id_1 = 1;
+  string version_1 = 2;
+  string template_id_2 = 3;
+  string version_2 = 4;
+  string tenant_id = 5;
+  repeated string comparison_criteria = 6; // 比较标准
+}
+
+// ========== 模板比较响应 ==========
+message TemplateCompareResponse {
+  string template_id_1 = 1;
+  string template_id_2 = 2;
+  map<string, double> score_differences = 3; // 得分差异
+  string recommendation = 4; // 推荐结果
+  repeated string key_differences = 5; // 关键差异
+  map<string, string> comparison_metrics = 6; // 比较指标
+}
+
+// ========== 模板搜索请求 ==========
+message TemplateSearchRequest {
+  string tenant_id = 1;
+  string query = 2; // 搜索查询
+  repeated string tags = 3; // 标签过滤
+  string category = 4; // 分类过滤
+  string language = 5; // 语言过滤
+  double min_score = 6; // 最小得分
+  map<string, string> custom_filters = 7; // 自定义过滤
+}

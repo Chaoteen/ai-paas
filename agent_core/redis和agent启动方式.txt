@@ -1,0 +1,16 @@
+启动 redis bus ,使用run_bus.py启动redis_bus.py
+cd /mnt/d/RD/ai-os/agent_core
+python run_bus.py
+
+启动router_bridge.py，这个是路由桥，是一个中间件
+cd /mnt/d/RD/ai-os/agent_core
+python router_bridge.py
+
+启动agent系统, agent 系统是智能体系的核心
+cd /mnt/d/RD/ai-os/server
+python start_agent_system.py
+
+
+测试多agent系统的自动分配逻辑功能
+cd /mnt/d/RD/ai-os/client/tests/agent
+python test_smart_routing.py

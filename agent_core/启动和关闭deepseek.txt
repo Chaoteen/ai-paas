@@ -1,0 +1,5 @@
+关闭  
+sudo systemctl stop ollama
+
+启动 
+sudo systemctl start ollama

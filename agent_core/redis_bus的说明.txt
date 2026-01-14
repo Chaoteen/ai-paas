@@ -1,0 +1,43 @@
+redis_bus.py = 消息总线 库 (可复用组件)
+
+run_bus.py = 总线 服务 (具体应用)
+
+redis_bus.py 是核心消息总线实现，所有消息都经过这里
+
+run_bus.py 只是总线的一个使用示例/启动脚本
+
+在阶段6结束之后系统已经有了
+✅ 完整的gRPC协议定义（agent.proto, envelope.proto等）
+
+✅ Redis消息总线（redis_bus.py, envelope_bus.py）
+
+✅ Agent管理核心（agent_service.py, agent_manager.py）
+
+✅ SDK层（aios_sdk/）
+
+✅ 测试框架（client/tests/）
+
+阶段6的系统架构图
+Client (双向gRPC流)
+      │
+      ▼
+gRPC Gateway (桥接同步↔异步)
+      │
+      ▼
+RouterBridge (路由分发)
+      │
+      ▼
+agent.tasks.stream
+      │
+      ├──► PromptEngine Service → agent.prompt.*
+      ├──► Agent Service        → agent.model.*
+      ├──► Model Service        → agent.model.*
+      ▼
+agent.result.stream
+      │
+      ▼
+gRPC Gateway (结果推送回Client)
+
+
+在完成了redis和agent的部署和测试后，在进入提示词工程之前，进行了系统的增强，主要增强点在于消息去重。在本套系统中，去重
+去重是总线的基础功能，应该在核心层实现

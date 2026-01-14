@@ -1,0 +1,122 @@
+﻿syntax = "proto3";
+
+package ai.os.inference;
+
+import "envelope.proto";
+
+option go_package = "aios/inference";
+option java_package = "com.aios.inference";
+
+// ========== 标准化推理请求 ==========
+message InferenceRequest {
+  string model_id = 1;
+  string version = 2;
+  string input_text = 3;
+  map<string, string> parameters = 4;
+  bool async = 5;
+  string session_id = 6; // 🎯 新增会话ID
+  string task_id = 7; // 🎯 新增任务ID
+  ai.os.envelope.StandardMetadata metadata = 8; // 🎯 新增标准化metadata
+  repeated ai.os.envelope.MemoryItem memory_context = 9; // 🎯 新增记忆上下文
+  repeated ai.os.envelope.RetrievedDocument retrieved_docs = 10; // 🎯 新增检索文档
+  ModelConfig model_config = 11; // 🎯 新增模型配置
+}
+
+// ========== 模型配置 ==========
+message ModelConfig {
+  double temperature = 1;
+  int32 max_tokens = 2;
+  double top_p = 3;
+  double frequency_penalty = 4;
+  double presence_penalty = 5;
+  repeated string stop_sequences = 6;
+  string response_format = 7; // text, json, etc.
+  map<string, string> custom_parameters = 8;
+}
+
+// ========== 标准化推理响应 ==========
+message InferenceResponse {
+  string output_text = 1;
+  double latency_ms = 2;
+  double cost_token = 3;
+  string explain_json = 4;
+  string session_id = 5; // 🎯 新增会话ID
+  string task_id = 6; // 🎯 新增任务ID
+  string model_used = 7; // 🎯 新增实际使用的模型
+  ai.os.envelope.TokenUsage token_usage = 8; // 🎯 新增详细的token使用
+  string finish_reason = 9; // 🎯 新增完成原因
+  map<string, string> performance_metrics = 10; // 🎯 新增性能指标
+  ai.os.envelope.StandardMetadata metadata = 11; // 🎯 新增metadata
+}
+
+// ========== 流式推理响应 ==========
+message StreamInferenceResponse {
+  string chunk = 1;
+  string session_id = 2;
+  string task_id = 3;
+  bool is_final = 4;
+  ai.os.envelope.TokenUsage cumulative_usage = 5;
+  string finish_reason = 6;
+}
+
+// ========== 模型信息 ==========
+message ModelInfo {
+  string model_id = 1;
+  string version = 2;
+  string provider = 3;
+  string context_window = 4;
+  repeated string capabilities = 5;
+  ModelStatus status = 6;
+  map<string, string> configuration = 7;
+  double cost_per_token = 8;
+}
+
+// ========== 模型状态 ==========
+message ModelStatus {
+  string availability = 1; // available, busy, offline, deprecated
+  double load_factor = 2;
+  int32 current_requests = 3;
+  double avg_response_time = 4;
+  string last_updated = 5;
+}
+
+// ========== 批量推理请求 ==========
+message BatchInferenceRequest {
+  repeated InferenceRequest requests = 1;
+  string batch_id = 2;
+  ai.os.envelope.StandardMetadata metadata = 3;
+}
+
+// ========== 批量推理响应 ==========
+message BatchInferenceResponse {
+  repeated InferenceResponse responses = 1;
+  string batch_id = 2;
+  double total_processing_time = 3;
+  ai.os.envelope.TokenUsage total_token_usage = 4;
+  map<string, string> batch_metrics = 5;
+}
+
+service InferenceService {
+  rpc RunInference(InferenceRequest) returns (InferenceResponse);
+  rpc BatchInference(stream InferenceRequest) returns (stream InferenceResponse);
+  
+  // 🎯 新增标准化接口
+  rpc StreamInference(InferenceRequest) returns (stream StreamInferenceResponse);
+  rpc RunBatchInference(BatchInferenceRequest) returns (BatchInferenceResponse);
+  
+  // 🎯 新增模型管理接口
+  rpc GetModelInfo(ai.os.envelope.StringValue) returns (ModelInfo); // model_id
+  rpc ListAvailableModels(ai.os.envelope.Envelope) returns (stream ModelInfo);
+  rpc UpdateModelStatus(ModelStatusUpdate) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增健康检查
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}
+
+// ========== 模型状态更新 ==========
+message ModelStatusUpdate {
+  string model_id = 1;
+  string status = 2; // available, busy, offline, maintenance
+  string reason = 3;
+  int32 expected_duration = 4; // 预计持续时间（秒）
+}

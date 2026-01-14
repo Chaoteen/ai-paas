@@ -1,0 +1,125 @@
+﻿syntax = "proto3";
+
+package ai.os.langgraph;
+
+import "envelope.proto";
+
+option go_package = "aios/langgraph";
+option java_package = "com.aios.langgraph";
+
+// ========== 标准化路由请求 ==========
+message RoutingRequest {
+  string task_id = 1;
+  string session_id = 2; // 🎯 新增会话ID
+  int32 message_seq = 3; // 🎯 新增消息序列号
+  string content = 4;
+  string task_type = 5;
+  string model = 6;
+  ai.os.envelope.StandardMetadata metadata = 7; // 🎯 升级为标准化metadata
+  double timestamp = 8;
+  repeated string available_agents = 9; // 🎯 新增可用Agent列表
+  RoutingContext context = 10; // 🎯 新增路由上下文
+}
+
+// ========== 路由上下文 ==========
+message RoutingContext {
+  repeated ai.os.envelope.MemoryItem conversation_history = 1;
+  repeated ai.os.envelope.RetrievedDocument relevant_documents = 2;
+  string user_intent = 3;
+  string complexity_level = 4; // low, medium, high
+  string content_language = 5;
+  map<string, string> contextual_hints = 6;
+}
+
+// ========== 标准化路由响应 ==========
+message RoutingResponse {
+  string target_agent = 1;
+  string reasoning = 2;
+  double confidence = 3;
+  map<string, string> parameters = 4;
+  string fallback_agent = 5;
+  string session_id = 6; // 🎯 新增会话ID
+  string task_id = 7; // 🎯 新增任务ID
+  RoutingMetrics metrics = 8; // 🎯 新增路由指标
+  repeated string alternative_agents = 9; // 🎯 新增备选Agent
+  string routing_strategy = 10; // 🎯 新增路由策略
+}
+
+// ========== 路由指标 ==========
+message RoutingMetrics {
+  double processing_time = 1;
+  string algorithm_used = 2;
+  int32 agents_considered = 3;
+  map<string, double> agent_scores = 4;
+  string decision_factors = 5;
+}
+
+// ========== 路由统计 ==========
+message RoutingStats {
+  int32 total_requests = 1;
+  int32 successful_routes = 2;
+  int32 fallback_routes = 3;
+  double average_confidence = 4;
+  map<string, int32> agent_distribution = 5;
+  double average_processing_time = 6;
+  string timestamp = 7;
+}
+
+// ========== Agent路由配置 ==========
+message AgentRoutingConfig {
+  string agent_id = 1;
+  repeated string capabilities = 2;
+  repeated string supported_task_types = 3;
+  map<string, double> capability_scores = 4; // 能力得分
+  RoutingConstraints constraints = 5;
+  string preferred_scenarios = 6;
+}
+
+// ========== 路由约束 ==========
+message RoutingConstraints {
+  int32 max_concurrent_tasks = 1;
+  repeated string blocked_content_types = 2;
+  repeated string required_metadata = 3;
+  string min_user_level = 4; // 最低用户等级要求
+  map<string, string> custom_constraints = 5;
+}
+
+// ========== 路由规则 ==========
+message RoutingRule {
+  string rule_id = 1;
+  string condition = 2; // 条件表达式
+  string target_agent = 3;
+  double priority = 4;
+  string description = 5;
+  bool enabled = 6;
+  map<string, string> parameters = 7;
+}
+
+// ========== 路由策略更新 ==========
+message RoutingStrategyUpdate {
+  string strategy_name = 1;
+  repeated RoutingRule rules = 2;
+  map<string, AgentRoutingConfig> agent_configs = 3;
+  string update_reason = 4;
+  string timestamp = 5;
+}
+
+service LangGraphRouter {
+  rpc GetRoutingDecision(RoutingRequest) returns (RoutingResponse);
+  rpc StreamRoutingDecision(stream RoutingRequest) returns (stream RoutingResponse);
+  
+  // 🎯 新增标准化接口
+  rpc GetRoutingStats(ai.os.envelope.Envelope) returns (RoutingStats);
+  rpc UpdateRoutingStrategy(RoutingStrategyUpdate) returns (ai.os.envelope.Envelope);
+  rpc GetAgentRoutingConfig(ai.os.envelope.StringValue) returns (AgentRoutingConfig); // agent_id
+  rpc UpdateAgentRoutingConfig(AgentRoutingConfig) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增批量路由
+  rpc BatchRouting(stream RoutingRequest) returns (stream RoutingResponse);
+  
+  // 🎯 新增验证接口
+  rpc ValidateRouting(RoutingRequest) returns (RoutingResponse);
+  
+  // 🎯 新增健康检查
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}

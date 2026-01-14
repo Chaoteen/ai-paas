@@ -1,0 +1,5 @@
+aiohttp>=3.8.0
+redis>=4.5.0
+grpcio>=1.50.0
+grpcio-tools>=1.50.0
+protobuf>=4.21.0

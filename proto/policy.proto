@@ -1,0 +1,172 @@
+﻿syntax = "proto3";
+
+package ai.os.policy;
+
+import "envelope.proto";
+
+option go_package = "aios/policy";
+option java_package = "com.aios.policy";
+
+// ========== 标准化策略规则 ==========
+message PolicyRule {
+  string id = 1;
+  string subject = 2; // user, role, service, tenant
+  string action = 3;
+  string resource = 4;
+  string effect = 5; // allow, deny, conditional
+  string condition = 6;
+  string tenant_id = 7; // 🎯 新增租户ID
+  RuleMetadata metadata = 8; // 🎯 新增规则元数据
+  repeated string tags = 9; // 🎯 新增标签
+  string priority = 10; // 🎯 新增优先级
+}
+
+// ========== 规则元数据 ==========
+message RuleMetadata {
+  string created_by = 1;
+  string created_at = 2;
+  string updated_by = 3;
+  string updated_at = 4;
+  string description = 5;
+  string version = 6;
+  bool enabled = 7;
+  map<string, string> custom_metadata = 8;
+}
+
+// ========== 标准化策略评估请求 ==========
+message PolicyEvalRequest {
+  string subject = 1;
+  string action = 2;
+  string resource = 3;
+  ai.os.envelope.StandardMetadata metadata = 4; // 🎯 新增标准化metadata
+  EvaluationContext context = 5; // 🎯 新增评估上下文
+  string tenant_id = 6; // 🎯 新增租户ID
+}
+
+// ========== 评估上下文 ==========
+message EvaluationContext {
+  map<string, string> attributes = 1; // 环境属性
+  string request_time = 2; // 请求时间
+  string location = 3; // 请求位置
+  string device_info = 4; // 设备信息
+  map<string, string> custom_context = 5;
+}
+
+// ========== 标准化策略评估响应 ==========
+message PolicyEvalResponse {
+  bool allowed = 1;
+  string matched_policy = 2;
+  string decision_reason = 3; // 🎯 新增决策原因
+  repeated string applied_rules = 4; // 🎯 新增应用的规则
+  EnforcementAction enforcement_action = 5; // 🎯 新增执行动作
+  map<string, string> evaluation_metrics = 6; // 🎯 新增评估指标
+  string tenant_id = 7; // 🎯 新增租户ID
+}
+
+// ========== 执行动作 ==========
+message EnforcementAction {
+  string action_type = 1; // allow, deny, quarantine, alert, log
+  string severity = 2; // low, medium, high, critical
+  repeated string notifications = 3; // 通知渠道
+  map<string, string> action_parameters = 4;
+}
+
+// ========== 策略组 ==========
+message PolicyGroup {
+  string group_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated string policy_ids = 4;
+  string tenant_id = 5;
+  GroupMetadata metadata = 6;
+  repeated string inherited_groups = 7; // 继承的策略组
+}
+
+// ========== 组元数据 ==========
+message GroupMetadata {
+  string created_by = 1;
+  string created_at = 2;
+  string scope = 3; // global, tenant, department, project
+  bool enabled = 4;
+  map<string, string> custom_metadata = 5;
+}
+
+// ========== 策略统计信息 ==========
+message PolicyStats {
+  int32 total_rules = 1;
+  int32 active_rules = 2;
+  int32 total_evaluations = 3;
+  int32 allowed_decisions = 4;
+  int32 denied_decisions = 5;
+  double avg_evaluation_time = 6;
+  map<string, int32> decision_distribution = 7;
+  string period_start = 8;
+  string period_end = 9;
+  string tenant_id = 10;
+}
+
+// ========== 批量评估请求 ==========
+message BatchEvalRequest {
+  repeated PolicyEvalRequest requests = 1;
+  string batch_id = 2;
+  string tenant_id = 3;
+}
+
+// ========== 批量评估响应 ==========
+message BatchEvalResponse {
+  repeated PolicyEvalResponse responses = 1;
+  string batch_id = 2;
+  BatchMetrics metrics = 3;
+  string tenant_id = 4;
+}
+
+// ========== 批量评估指标 ==========
+message BatchMetrics {
+  int32 total_requests = 1;
+  int32 processed_requests = 2;
+  double total_processing_time = 3;
+  double avg_processing_time = 4;
+  map<string, string> custom_metrics = 5;
+}
+
+service PolicyService {
+  rpc RegisterPolicy(PolicyRule) returns (ai.os.envelope.Envelope);
+  rpc Evaluate(PolicyEvalRequest) returns (PolicyEvalResponse);
+  rpc ListPolicies(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增标准化接口
+  rpc BatchEvaluate(BatchEvalRequest) returns (BatchEvalResponse);
+  rpc GetPolicyStats(PolicyStatsRequest) returns (PolicyStats);
+  rpc CreatePolicyGroup(PolicyGroup) returns (ai.os.envelope.Envelope);
+  rpc EvaluateWithContext(EnhancedEvalRequest) returns (PolicyEvalResponse);
+  
+  // 🎯 新增管理接口
+  rpc UpdatePolicyStatus(PolicyStatusUpdate) returns (ai.os.envelope.Envelope);
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}
+
+// ========== 策略统计请求 ==========
+message PolicyStatsRequest {
+  string tenant_id = 1;
+  string period = 2; // 统计周期
+  string start_time = 3;
+  string end_time = 4;
+  repeated string policy_ids = 5; // 特定策略ID
+}
+
+// ========== 增强评估请求 ==========
+message EnhancedEvalRequest {
+  PolicyEvalRequest base_request = 1;
+  bool include_trace = 2; // 是否包含决策追踪
+  bool validate_context = 3; // 是否验证上下文
+  map<string, string> evaluation_options = 4;
+}
+
+// ========== 策略状态更新 ==========
+message PolicyStatusUpdate {
+  string policy_id = 1;
+  bool enabled = 2;
+  string reason = 3;
+  string updated_by = 4;
+  string tenant_id = 5;
+}

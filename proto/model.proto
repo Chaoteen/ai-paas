@@ -1,0 +1,197 @@
+﻿syntax = "proto3";
+
+package ai.os.model;
+
+import "envelope.proto";
+
+option go_package = "aios/model";
+option java_package = "com.aios.model";
+
+// ========== 标准化模型注册 ==========
+message ModelRegistration {
+  string model_id = 1;
+  string name = 2;
+  string version = 3;
+  string backend = 4; // e.g., vLLM, Ollama, Qwen, DeepSeek
+  map<string, string> metadata = 5;
+  ModelCapabilities capabilities = 6; // 🎯 新增能力定义
+  ModelDeploymentConfig deployment_config = 7; // 🎯 新增部署配置
+  ResourceRequirements resources = 8; // 🎯 新增资源需求
+  string tenant_id = 9; // 🎯 新增租户ID
+}
+
+// ========== 模型能力定义 ==========
+message ModelCapabilities {
+  repeated string task_types = 1; // text-generation, code-generation, summarization, etc.
+  repeated string languages = 2; // 支持的语言
+  int32 context_window = 3; // 上下文窗口大小
+  bool supports_streaming = 4; // 是否支持流式输出
+  bool supports_tools = 5; // 是否支持工具调用
+  bool supports_vision = 6; // 是否支持视觉
+  bool supports_audio = 7; // 是否支持音频
+  repeated string specializations = 8; // 专业领域
+  map<string, string> custom_capabilities = 9;
+}
+
+// ========== 模型部署配置 ==========
+message ModelDeploymentConfig {
+  string deployment_type = 1; // realtime, batch, on-demand
+  int32 min_replicas = 2;
+  int32 max_replicas = 3;
+  ScalingPolicy scaling_policy = 4;
+  HealthCheckConfig health_check = 5;
+  map<string, string> environment_vars = 6;
+}
+
+// ========== 扩缩容策略 ==========
+message ScalingPolicy {
+  string policy_type = 1; // cpu, memory, requests, custom
+  int32 target_utilization = 2; // 目标利用率百分比
+  int32 cool_down_period = 3; // 冷却期（秒）
+  map<string, string> custom_metrics = 4;
+}
+
+// ========== 健康检查配置 ==========
+message HealthCheckConfig {
+  string endpoint = 1;
+  int32 interval = 2; // 检查间隔（秒）
+  int32 timeout = 3; // 超时时间（秒）
+  int32 retries = 4; // 重试次数
+  repeated string success_codes = 5; // 成功状态码
+}
+
+// ========== 资源需求 ==========
+message ResourceRequirements {
+  string cpu_request = 1; // CPU请求
+  string cpu_limit = 2; // CPU限制
+  string memory_request = 3; // 内存请求
+  string memory_limit = 4; // 内存限制
+  string gpu_type = 5; // GPU类型
+  int32 gpu_count = 6; // GPU数量
+  map<string, string> custom_resources = 7;
+}
+
+// ========== 标准化模型生命周期事件 ==========
+message ModelLifecycleEvent {
+  string model_id = 1;
+  string event_type = 2; // DEPLOY, UPDATE, ROLLBACK, RETIRE, SCALE_UP, SCALE_DOWN
+  string timestamp = 3;
+  string tenant_id = 4; // 🎯 新增租户ID
+  EventMetadata metadata = 5; // 🎯 新增事件元数据
+  string initiated_by = 6; // 🎯 新增发起者
+}
+
+// ========== 事件元数据 ==========
+message EventMetadata {
+  string previous_version = 1;
+  string new_version = 2;
+  string reason = 3;
+  string deployment_id = 4;
+  map<string, string> custom_data = 5;
+}
+
+// ========== 模型状态信息 ==========
+message ModelStatus {
+  string model_id = 1;
+  string availability = 2; // available, deploying, updating, offline, error
+  double load_factor = 3; // 负载因子 0.0 - 1.0
+  int32 current_requests = 4; // 当前请求数
+  double avg_response_time = 5; // 平均响应时间（毫秒）
+  string last_health_check = 6; // 最后健康检查时间
+  ResourceUsage resource_usage = 7; // 🎯 新增资源使用情况
+  PerformanceMetrics performance = 8; // 🎯 新增性能指标
+}
+
+// ========== 资源使用情况 ==========
+message ResourceUsage {
+  double cpu_usage = 1; // CPU使用率
+  double memory_usage = 2; // 内存使用率
+  double gpu_usage = 3; // GPU使用率
+  int32 active_connections = 4; // 活跃连接数
+  map<string, string> custom_metrics = 5;
+}
+
+// ========== 性能指标 ==========
+message PerformanceMetrics {
+  double p50_latency = 1; // P50延迟
+  double p95_latency = 2; // P95延迟
+  double p99_latency = 3; // P99延迟
+  double throughput = 4; // 吞吐量（请求/秒）
+  double error_rate = 5; // 错误率
+  map<string, string> custom_metrics = 6;
+}
+
+// ========== 模型统计信息 ==========
+message ModelStats {
+  string model_id = 1;
+  int32 total_requests = 2;
+  int32 successful_requests = 3;
+  int32 failed_requests = 4;
+  double total_processing_time = 5;
+  int64 total_tokens_processed = 6;
+  double avg_confidence_score = 7;
+  map<string, int32> task_type_distribution = 8;
+  string period_start = 9; // 统计周期开始时间
+  string period_end = 10; // 统计周期结束时间
+}
+
+// ========== 模型查询请求 ==========
+message ModelQueryRequest {
+  string tenant_id = 1;
+  repeated string capabilities = 2; // 所需能力
+  string task_type = 3; // 任务类型
+  ResourceConstraints resource_constraints = 4; // 资源约束
+  map<string, string> filters = 5; // 过滤条件
+}
+
+// ========== 资源约束 ==========
+message ResourceConstraints {
+  string max_cpu = 1;
+  string max_memory = 2;
+  int32 max_gpu_count = 3;
+  double max_latency = 4; // 最大延迟要求
+  double min_throughput = 5; // 最小吞吐量要求
+}
+
+service ModelRegistryService {
+  rpc RegisterModel(ModelRegistration) returns (ai.os.envelope.Envelope);
+  rpc ListModels(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+  rpc PublishLifecycleEvent(ModelLifecycleEvent) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增标准化接口
+  rpc GetModelStatus(ai.os.envelope.StringValue) returns (ModelStatus); // model_id
+  rpc GetModelStats(ModelStatsRequest) returns (ModelStats);
+  rpc QueryModels(ModelQueryRequest) returns (stream ModelRegistration);
+  rpc UpdateModelStatus(ModelStatusUpdate) returns (ai.os.envelope.Envelope);
+  
+  // 🎯 新增管理接口
+  rpc ScaleModel(ScaleRequest) returns (ai.os.envelope.Envelope);
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}
+
+// ========== 模型统计请求 ==========
+message ModelStatsRequest {
+  string model_id = 1;
+  string period = 2; // 统计周期：hourly, daily, weekly, monthly
+  string start_time = 3;
+  string end_time = 4;
+  string tenant_id = 5;
+}
+
+// ========== 模型状态更新 ==========
+message ModelStatusUpdate {
+  string model_id = 1;
+  string status = 2; // available, maintenance, offline
+  string reason = 3;
+  int32 expected_duration = 4; // 预计持续时间（秒）
+  string tenant_id = 5;
+}
+
+// ========== 扩缩容请求 ==========
+message ScaleRequest {
+  string model_id = 1;
+  int32 target_replicas = 2;
+  string scale_reason = 3; // load, schedule, manual, etc.
+  map<string, string> scale_parameters = 4;
+  string tenant_id = 5;
+}

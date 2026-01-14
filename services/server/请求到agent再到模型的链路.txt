@@ -1,0 +1,43 @@
+用户请求 → agent.tasks.stream → TaskManager → ModelService → agent.result.stream
+
+Langgraph的升级方案
+基于您的AI PaaS架构，LangGraph集成方案：
+
+应该替代的服务：
+
+router_bridge.py - 用LangGraph智能路由替代硬编码路由逻辑
+
+应该升级的服务：
+
+agent_registry.py - 扩展为服务发现中心，供LangGraph查询可用agent
+
+agent_manager.py - 增加与LangGraph的协调接口
+
+start_agent_system.py - 保持现有agent启动功能
+
+保留不变的服务：
+
+AgentService类 - 继续作为任务执行器
+
+
+
+# 查看所有streams
+redis-cli keys "*stream*"
+
+# 检查agent.tasks.stream中的消息格式
+redis-cli xrange agent.tasks.stream - +
+
+# 检查agent.routed.tasks.stream中的消息格式  
+redis-cli xrange agent.routed.tasks.stream - +
+
+# 检查agent.result.stream中的消息格式
+redis-cli xrange agent.result.stream - +
+
+
+消息格式确认：
+
+输入：{"topic": "agent.task", "data": {"task_id": "...", "content": "...", "model": "...", "task_type": "..."}}
+
+路由后：{"topic": "agent.model.agent.xxx", "data": {...}}
+
+输出：{"topic": "agent.result", "data": {"task_id": "...", "result": {...}}}

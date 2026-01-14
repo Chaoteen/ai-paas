@@ -1,0 +1,11 @@
+2025年10月24日
+已经修改了server agent service代码，启动方式如下
+(qwen) boris@QYZHAIstation01:/mnt/d/RD/ai-os$ python -m server.agent_service
+之前的带哦用问题出在deepseek service调用方式采用了线上api方案，这个会导致出错。
+现在已经修复了deepseek service的调用方式，
+(qwen) boris@QYZHAIstation01:/mnt/d/RD/ai-os$ curl -X POST http://localhost:11434/api/generate -d '{
+  "model": "deepseek-r1:14b",
+  "prompt": "你好",
+  "stream": false
+}'
+deepseek给了一个线上线下兼容的方案，这次调试没有用那个方案，我认为那个代码量太大，里面还包含了线上和线下两重逻辑，我不想在调试gPRC 对接本地模型服务阶段搞那么复杂

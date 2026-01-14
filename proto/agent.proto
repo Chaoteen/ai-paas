@@ -1,0 +1,142 @@
+syntax = "proto3";
+package ai.os.agent;
+
+import "envelope.proto";
+
+option go_package = "aios/agent";
+option java_package = "com.aios.agent";
+
+message Agent {
+  string id = 1;
+  string name = 2;
+  string skill_manifest = 3;
+  map<string, string> config = 4;
+  AgentCapabilities capabilities = 5;
+  AgentStatus status = 6;
+  repeated string supported_models = 7;
+}
+
+message AgentCapabilities {
+  repeated string task_types = 1;
+  repeated string languages = 2;
+  int32 max_context_length = 3;
+  bool supports_streaming = 4;
+  bool supports_tools = 5;
+  repeated string specializations = 6;
+}
+
+message AgentStatus {
+  string availability = 1;
+  double load_factor = 2;
+  int32 current_tasks = 3;
+  double avg_response_time = 4;
+  string last_heartbeat = 5;
+}
+
+message Task {
+  string task_id = 1;
+  string session_id = 2;
+  int32 message_seq = 3;
+  string agent_id = 4;
+  string goal = 5;
+  map<string, string> context = 6;
+  ai.os.envelope.StandardMetadata metadata = 7;
+  string parent_task_id = 8;
+  repeated string dependent_tasks = 9;
+  TaskPriority priority = 10;
+}
+
+enum TaskPriority {
+  LOW = 0;
+  NORMAL = 1;
+  HIGH = 2;
+  URGENT = 3;
+}
+
+message TaskStatus {
+  string task_id = 1;
+  string session_id = 2;
+  string state = 3;
+  string output = 4;
+  string agent_used = 5;
+  string model_used = 6;
+  double processing_time = 7;
+  TokenUsage token_usage = 8;
+  string error_message = 9;
+  map<string, string> performance_metrics = 10;
+}
+
+message TokenUsage {
+  int32 prompt_tokens = 1;
+  int32 completion_tokens = 2;
+  int32 total_tokens = 3;
+  double estimated_cost = 4;
+}
+
+message Session {
+  string session_id = 1;
+  string user_id = 2;
+  string tenant_id = 3;
+  string created_at = 4;
+  string last_activity = 5;
+  int32 total_tasks = 6;
+  SessionStatus status = 7;
+  ai.os.envelope.StandardMetadata metadata = 8;
+}
+
+enum SessionStatus {
+  ACTIVE = 0;
+  INACTIVE = 1;
+  COMPLETED = 2;
+  EXPIRED = 3;
+}
+
+message AgentStats {
+  string agent_id = 1;
+  int32 total_tasks_processed = 2;
+  int32 successful_tasks = 3;
+  int32 failed_tasks = 4;
+  double avg_processing_time = 5;
+  double success_rate = 6;
+  map<string, int32> task_type_distribution = 7;
+  string last_task_time = 8;
+}
+
+message AgentStatusUpdate {
+  string agent_id = 1;
+  string status = 2;
+  string reason = 3;
+  int32 expected_duration = 4;
+}
+
+// ========== 请求/响应包装消息 ==========
+message StringRequest {
+  string value = 1;
+}
+
+message SessionResponse {
+  Session session = 1;
+}
+
+message AgentStatsResponse {
+  AgentStats stats = 1;
+}
+
+service AgentService {
+  rpc RegisterAgent(Agent) returns (ai.os.envelope.Envelope);
+  rpc ExecuteTask(Task) returns (TaskStatus);
+  rpc StreamTask(stream Task) returns (stream TaskStatus);
+  
+  // Session management
+  rpc CreateSession(Session) returns (Session);
+  rpc GetSession(StringRequest) returns (SessionResponse);
+  rpc CloseSession(StringRequest) returns (SessionResponse);
+  
+  // Statistics
+  rpc GetAgentStats(StringRequest) returns (AgentStatsResponse);
+  rpc GetAllAgentsStats(ai.os.envelope.Envelope) returns (stream AgentStats);
+  
+  // Management
+  rpc UpdateAgentStatus(AgentStatusUpdate) returns (ai.os.envelope.Envelope);
+  rpc HealthCheck(ai.os.envelope.Envelope) returns (ai.os.envelope.Envelope);
+}
