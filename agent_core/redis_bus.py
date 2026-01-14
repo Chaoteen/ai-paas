@@ -1,3 +1,4 @@
+# test: git + wsl + vscode edit verification
 # ai-os/agent_core/redis_bus.py
 from __future__ import annotations
 
