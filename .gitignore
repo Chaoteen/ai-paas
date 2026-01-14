@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+tmp/
+
+# Env / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Conda / venv
+.venv/
+venv/
+.env/
+.conda/
+conda-bld/
+
+# Local data (if any)
+data/
