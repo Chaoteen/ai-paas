@@ -22,7 +22,7 @@ logger.setLevel(logging.INFO)
 # ==========================================================
 class StandardizedMessageProcessor:
     """
-    约定的标准化消息 envelope：
+    约定的标准化消息 envelope:
     {
       "topic": "...",
       "data": {...},
@@ -171,7 +171,7 @@ class MessageDeduplicator:
 
     def is_duplicate_task(self, ctx: dict, expire_seconds: int = 300) -> bool:
         """
-        SETNX：第一次 seen 返回 False；后续返回 True
+        SETNX：第一次 seen 返回 False;后续返回 True
         """
         dkey = self._dedup_key(ctx)
         key = f"{self.key_prefix}task:{dkey}"
@@ -203,10 +203,10 @@ class MessageDeduplicator:
 # ==========================================================
 class RedisBackedEnvelopeBUS:
     """
-    标准化 Redis Streams BUS（最终版）
+    标准化 Redis Streams BUS(最终版)
 
     - subscribe(topic, handler): handler 接收 processing_context
-    - publish(topic, data, metadata): data 可 dict/any，metadata dict
+    - publish(topic, data, metadata): data 可 dict/any,metadata dict
     """
 
     def __init__(
@@ -289,7 +289,7 @@ class RedisBackedEnvelopeBUS:
         metadata: Optional[dict] = None,
     ):
         """
-        统一 publish：写入 stream_name
+        统一 publish:写入 stream_name
         """
         try:
             env = self.message_processor.create_standardized_envelope(topic, data, metadata or {})
@@ -360,7 +360,7 @@ class RedisBackedEnvelopeBUS:
     # --------------------------
     def _stream_message_handler(self):
         """
-        后台线程：xreadgroup -> parse -> (dedup) -> dispatch -> ack
+        后台线程:xreadgroup -> parse -> (dedup) -> dispatch -> ack
         """
         logger.info("🟢 Streams线程启动 consumer=%s", self.consumer_id)
 
@@ -408,7 +408,7 @@ class RedisBackedEnvelopeBUS:
 
                             handlers = self.local_handlers.get(topic, [])
                             if not handlers:
-                                logger.warning("⚠️ 无handler topic=%s，直接ack避免堆积", topic)
+                                logger.warning("⚠️ 无handler topic=%s,直接ack避免堆积", topic)
                                 self.redis.xack(self.stream_name, self.consumer_group, msg_id)
                                 continue
 
@@ -420,7 +420,7 @@ class RedisBackedEnvelopeBUS:
                                 try:
                                     if asyncio.iscoroutinefunction(handler):
                                         if not self._main_loop or not self._main_loop.is_running():
-                                            raise RuntimeError("主事件循环不可用，无法调度async handler")
+                                            raise RuntimeError("主事件循环不可用,无法调度async handler")
 
                                         fut = asyncio.run_coroutine_threadsafe(handler(ctx), self._main_loop)
                                         fut.result(timeout=self.handler_timeout_seconds)
@@ -460,7 +460,7 @@ class RedisBackedEnvelopeBUS:
 
             except Exception as e:
                 if "NOGROUP" in str(e):
-                    logger.warning("🔄 NOGROUP，重新初始化消费者组...")
+                    logger.warning("🔄 NOGROUP,重新初始化消费者组...")
                     try:
                         self._initialize_stream_group()
                     except Exception as inner:
