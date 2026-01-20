@@ -1,328 +1,356 @@
 # ai-os/agent_core/memory.py
+# FINAL BASELINE (multi-tenant + session scoped + hot/cold + backward compatible)
+# - 以 tenant_id 为一级隔离；以 session_id 为二级隔离
+# - 支持 conversation_history / task_results / user_preferences / knowledge_base
+# - 支持 hot/cold 记忆（结构上分区；是否落盘由上层决定）
+# - 保持旧接口 Memory.add(task_id, content, result) / Memory.get(task_id) 可用
+# - 新接口建议使用 MemoryManager.add_task_result(... tenant_id/session_id ...)
+
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+import threading
 
 
-DEFAULT_TENANT = "default"
-DEFAULT_SESSION = "default"
+def _now() -> float:
+    return time.time()
+
+
+@dataclass
+class TaskRecord:
+    task_id: str
+    content: str
+    result: Optional[str] = None
+    timestamp: float = field(default_factory=_now)
+    session_id: Optional[str] = None
+    message_seq: Optional[int] = None
+    request_id: Optional[str] = None
+    envelope_id: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class ConversationTurn:
     role: str
     content: str
-    timestamp: float = field(default_factory=lambda: time.time())
+    timestamp: float = field(default_factory=_now)
+    task_id: Optional[str] = None
+    message_seq: Optional[int] = None
+    request_id: Optional[str] = None
+    envelope_id: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class TaskRecord:
-    content: str
-    result: Optional[str] = None
-    timestamp: float = field(default_factory=lambda: time.time())
-    # 预留：用于审计/追踪
-    request_id: Optional[str] = None
-    envelope_id: Optional[str] = None
-    message_seq: Optional[int] = None
+class TenantSessionMemory:
+    # hot/cold 分区：你可以在上层决定哪些写 hot，哪些写 cold
+    hot: Dict[str, Any] = field(default_factory=dict)
+    cold: Dict[str, Any] = field(default_factory=dict)
 
 
 class MemoryManager:
     """
-    多租户 + 会话隔离的记忆管理器（最终版）
+    多租户记忆管理器（内存版）
 
-    数据层级：
-    tenant_id -> session_id -> buckets
-      - conversation_history: List[ConversationTurn]
-      - task_results: Dict[task_id, TaskRecord]
-      - user_preferences: Dict[str, Any]
-      - knowledge_base: List[Any]
-      - hot: List[Any]   (预留)
-      - cold: List[Any]  (预留)
+    数据隔离：
+      tenant_id -> session_id -> TenantSessionMemory
+
+    说明：
+    - 你当前系统里 memory.py 主要用于兼容测试/本地调试。
+    - 若你要把 cold memory 落盘（Redis/SQLite/VectorDB），建议把“存取接口”保留，
+      将具体存储实现下沉到独立模块（memory_store/）。
     """
 
     def __init__(self):
-        self._lock = asyncio.Lock()
+        self._lock = threading.RLock()
+        self._store: Dict[str, Dict[str, TenantSessionMemory]] = {}
+        # user 级别偏好（tenant隔离）
+        self._user_prefs: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tenant -> user_id -> prefs
 
-        # tenant_id -> session_id -> memory dict
-        self._store: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    # -------------------------
+    # 内部：获取/创建 session mem
+    # -------------------------
 
-    # -----------------------------
-    # 内部工具
-    # -----------------------------
-    def _normalize_scope(self, tenant_id: Optional[str], session_id: Optional[str]) -> Tuple[str, str]:
-        t = tenant_id or DEFAULT_TENANT
-        s = session_id or DEFAULT_SESSION
-        return t, s
+    def _get_session_mem(self, tenant_id: str, session_id: str) -> TenantSessionMemory:
+        with self._lock:
+            if tenant_id not in self._store:
+                self._store[tenant_id] = {}
+            if session_id not in self._store[tenant_id]:
+                self._store[tenant_id][session_id] = TenantSessionMemory(
+                    hot={
+                        "conversation_history": [],
+                        "task_results": {},
+                        "knowledge_base": [],
+                    },
+                    cold={
+                        "conversation_history": [],
+                        "task_results": {},
+                        "knowledge_base": [],
+                    },
+                )
+            return self._store[tenant_id][session_id]
 
-    def _ensure_session(self, tenant_id: str, session_id: str):
-        if tenant_id not in self._store:
-            self._store[tenant_id] = {}
-        if session_id not in self._store[tenant_id]:
-            self._store[tenant_id][session_id] = {
-                "conversation_history": [],
-                "task_results": {},
-                "user_preferences": {},
-                "knowledge_base": [],
-                "hot": [],
-                "cold": [],
-            }
+    def _ensure_tenant(self, tenant_id: Optional[str]) -> str:
+        # 最小化侵入：未传 tenant 统一归入 default
+        return tenant_id or "default"
 
-    # -----------------------------
-    # 推荐新接口（多租户/会话）
-    # -----------------------------
-    async def add_conversation(
+    def _ensure_session(self, session_id: Optional[str], task_id: Optional[str] = None) -> str:
+        if session_id:
+            return session_id
+        if task_id:
+            return f"sess_{task_id}"
+        return "sess_default"
+
+    # -------------------------
+    # Conversation
+    # -------------------------
+
+    def add_conversation(
         self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
         role: str,
         content: str,
-    ):
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            self._store[t][s]["conversation_history"].append(
-                ConversationTurn(role=role, content=content)
-            )
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        message_seq: Optional[int] = None,
+        request_id: Optional[str] = None,
+        envelope_id: Optional[str] = None,
+        mem_tier: str = "hot",  # "hot" | "cold"
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, task_id)
+        sess_mem = self._get_session_mem(tenant, session)
 
-    async def add_task_result(
+        turn = ConversationTurn(
+            role=role,
+            content=content,
+            task_id=task_id,
+            message_seq=message_seq,
+            request_id=request_id,
+            envelope_id=envelope_id,
+            extra=extra or {},
+        )
+
+        with self._lock:
+            bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+            bucket["conversation_history"].append(turn.__dict__)
+
+    def get_recent_conversations(
         self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
+        n: int = 10,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        mem_tier: str = "hot",
+    ) -> List[Dict[str, Any]]:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, task_id)
+        sess_mem = self._get_session_mem(tenant, session)
+
+        bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+        history = bucket.get("conversation_history", [])
+        return history[-n:]
+
+    # -------------------------
+    # Task Results
+    # -------------------------
+
+    def add_task_result(
+        self,
         task_id: str,
         content: str,
         result: Optional[str],
         *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        message_seq: Optional[int] = None,
         request_id: Optional[str] = None,
         envelope_id: Optional[str] = None,
-        message_seq: Optional[int] = None,
-    ):
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            self._store[t][s]["task_results"][task_id] = TaskRecord(
-                content=content,
-                result=result,
-                request_id=request_id,
-                envelope_id=envelope_id,
-                message_seq=message_seq,
-            )
+        mem_tier: str = "hot",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, task_id)
+        sess_mem = self._get_session_mem(tenant, session)
 
-    async def get_recent_conversations(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        n: int = 10,
-    ) -> List[Dict[str, Any]]:
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            turns: List[ConversationTurn] = self._store[t][s]["conversation_history"][-n:]
-            return [
-                {"role": x.role, "content": x.content, "timestamp": x.timestamp}
-                for x in turns
-            ]
-
-    async def get_task_result(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        task_id: str,
-    ) -> Optional[Dict[str, Any]]:
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            rec: Optional[TaskRecord] = self._store[t][s]["task_results"].get(task_id)
-            if not rec:
-                return None
-            return {
-                "content": rec.content,
-                "result": rec.result,
-                "timestamp": rec.timestamp,
-                "request_id": rec.request_id,
-                "envelope_id": rec.envelope_id,
-                "message_seq": rec.message_seq,
-            }
-
-    async def set_user_preference(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        key: str,
-        value: Any,
-    ):
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            self._store[t][s]["user_preferences"][key] = value
-
-    async def get_user_preferences(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-    ) -> Dict[str, Any]:
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            return dict(self._store[t][s]["user_preferences"])
-
-    async def add_hot_memory(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        item: Any,
-    ):
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            self._store[t][s]["hot"].append(item)
-
-    async def add_cold_memory(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        item: Any,
-    ):
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            self._store[t][s]["cold"].append(item)
-
-    async def get_hot_memory(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        n: int = 20,
-    ) -> List[Any]:
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            return list(self._store[t][s]["hot"][-n:])
-
-    async def get_cold_memory(
-        self,
-        tenant_id: Optional[str],
-        session_id: Optional[str],
-        n: int = 20,
-    ) -> List[Any]:
-        t, s = self._normalize_scope(tenant_id, session_id)
-        async with self._lock:
-            self._ensure_session(t, s)
-            return list(self._store[t][s]["cold"][-n:])
-
-    # -----------------------------
-    # 便捷接口：从标准 envelope 写入
-    # -----------------------------
-    async def add_from_envelope(
-        self,
-        envelope: Dict[str, Any],
-        *,
-        assistant_result: Optional[str] = None,
-    ):
-        """
-        从你标准化后的 envelope 直接写入 task_results / conversation_history。
-        envelope 期望字段：
-        - tenant_id/session_id/task_id
-        - data.content 或 input.user_message
-        - request_id/envelope_id/message_seq (可选)
-        """
-        tenant_id = envelope.get("tenant_id")
-        session_id = envelope.get("session_id")
-        task_id = envelope.get("task_id") or "unknown_task"
-        message_seq = envelope.get("message_seq")
-
-        request_id = envelope.get("request_id")
-        envelope_id = envelope.get("envelope_id")
-
-        data = envelope.get("data", {}) if isinstance(envelope.get("data"), dict) else {}
-        content = data.get("content") or data.get("user_message") or ""
-
-        # 记录用户消息
-        if content:
-            await self.add_conversation(tenant_id, session_id, role="user", content=content)
-
-        # 记录任务结果
-        await self.add_task_result(
-            tenant_id,
-            session_id,
+        record = TaskRecord(
             task_id=task_id,
             content=content,
-            result=assistant_result,
+            result=result,
+            session_id=session,
+            message_seq=message_seq,
             request_id=request_id,
             envelope_id=envelope_id,
-            message_seq=message_seq,
+            extra=extra or {},
         )
 
-    # -----------------------------
-    # 管理工具：清理/统计
-    # -----------------------------
-    async def get_stats(self) -> Dict[str, Any]:
-        async with self._lock:
-            tenants = len(self._store)
-            sessions = sum(len(self._store[t]) for t in self._store)
-            tasks = 0
-            turns = 0
-            for t in self._store:
-                for s in self._store[t]:
-                    tasks += len(self._store[t][s]["task_results"])
-                    turns += len(self._store[t][s]["conversation_history"])
-            return {
-                "tenants": tenants,
-                "sessions": sessions,
-                "tasks": tasks,
-                "conversation_turns": turns,
-            }
+        with self._lock:
+            bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+            bucket["task_results"][task_id] = record.__dict__
 
-    async def clear_tenant(self, tenant_id: str):
-        async with self._lock:
-            self._store.pop(tenant_id, None)
+    def get_task_result(
+        self,
+        task_id: str,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        mem_tier: str = "hot",
+    ) -> Optional[Dict[str, Any]]:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, task_id)
+        sess_mem = self._get_session_mem(tenant, session)
 
-    async def clear_session(self, tenant_id: str, session_id: str):
-        async with self._lock:
-            if tenant_id in self._store:
-                self._store[tenant_id].pop(session_id, None)
+        bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+        return bucket.get("task_results", {}).get(task_id)
+
+    # -------------------------
+    # Knowledge Base (simple list)
+    # -------------------------
+
+    def add_knowledge(
+        self,
+        item: Any,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        mem_tier: str = "cold",
+    ) -> None:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, None)
+        sess_mem = self._get_session_mem(tenant, session)
+
+        with self._lock:
+            bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+            bucket["knowledge_base"].append({"value": item, "timestamp": _now()})
+
+    def get_knowledge(
+        self,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        mem_tier: str = "cold",
+    ) -> List[Dict[str, Any]]:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, None)
+        sess_mem = self._get_session_mem(tenant, session)
+
+        bucket = sess_mem.hot if mem_tier == "hot" else sess_mem.cold
+        return list(bucket.get("knowledge_base", []))
+
+    # -------------------------
+    # User Preferences (tenant scoped)
+    # -------------------------
+
+    def set_user_preferences(
+        self,
+        user_id: str,
+        prefs: Dict[str, Any],
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> None:
+        tenant = self._ensure_tenant(tenant_id)
+        with self._lock:
+            if tenant not in self._user_prefs:
+                self._user_prefs[tenant] = {}
+            self._user_prefs[tenant][user_id] = dict(prefs)
+
+    def get_user_preferences(
+        self,
+        user_id: str,
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        tenant = self._ensure_tenant(tenant_id)
+        with self._lock:
+            return dict(self._user_prefs.get(tenant, {}).get(user_id, {}))
+
+    # -------------------------
+    # Generic (backward compatible-ish)
+    # -------------------------
+
+    def add(self, key: str, value: Any, *, tenant_id: Optional[str] = None, session_id: Optional[str] = None) -> None:
+        """
+        旧版通用 add：现在默认写到 hot 的 key list
+        """
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, None)
+        sess_mem = self._get_session_mem(tenant, session)
+        with self._lock:
+            if key not in sess_mem.hot:
+                sess_mem.hot[key] = []
+            if not isinstance(sess_mem.hot[key], list):
+                # 不破坏已有结构：如果不是 list，直接覆盖为 list
+                sess_mem.hot[key] = []
+            sess_mem.hot[key].append(value)
+
+    def get(self, key: str, *, tenant_id: Optional[str] = None, session_id: Optional[str] = None) -> Any:
+        tenant = self._ensure_tenant(tenant_id)
+        session = self._ensure_session(session_id, None)
+        sess_mem = self._get_session_mem(tenant, session)
+        return sess_mem.hot.get(key, [])
 
 
 class Memory:
     """
-    兼容旧测试代码的适配器（保持接口不变）
-
-    旧接口问题：
-    - 原来只按 task_id 存，没有 tenant/session，存在串租风险
-    兼容策略：
-    - 默认落到 default/default
-    - 仍然提供 history 映射（指向 default/default 的 task_results）
+    MemoryManager 的适配器类，保持与现有测试代码兼容
+    - 旧接口：add(task_id, content, result=None), get(task_id)
+    - 新增：可选 tenant_id/session_id/request_id/envelope_id 透传
     """
 
-    def __init__(self):
+    def __init__(self, tenant_id: Optional[str] = None, session_id: Optional[str] = None):
         self.manager = MemoryManager()
-        self._tenant_id = DEFAULT_TENANT
-        self._session_id = DEFAULT_SESSION
-
-        # 兼容旧测试代码：直接暴露 default/default 的 task_results dict 视图（只读语义）
-        # 注意：这里为了兼容，history 是一个动态读取的属性形式更安全，但旧代码可能当作 dict 使用。
+        self._tenant_id = tenant_id or "default"
+        self._session_id = session_id  # 可为空
+        # 兼容现有测试代码：history 指向 task_results
+        # 注意：现在是“按 tenant/session 分区”，所以 history 不再是全局 dict
         self.history: Dict[str, Any] = {}
 
-    async def _refresh_history_view(self):
-        # 将 default/default task_results 映射到 self.history（用于兼容调试）
-        recs = await self.manager.get_stats()
-        _ = recs  # 占位，避免 lint
-        # 这里不做真实深拷贝：只提供 get 接口即可；如果你确实有旧代码直接读取 history，
-        # 可以在 add/get 时同步更新 self.history
+    def add(
+        self,
+        task_id: str,
+        content: str,
+        result: str = None,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        message_seq: Optional[int] = None,
+        request_id: Optional[str] = None,
+        envelope_id: Optional[str] = None,
+        mem_tier: str = "hot",
+        extra: Optional[Dict[str, Any]] = None,
+    ):
+        tenant = tenant_id or self._tenant_id
+        sess = session_id or self._session_id or f"sess_{task_id}"
 
-    async def add(self, task_id: str, content: str, result: str = None):
-        await self.manager.add_task_result(
-            self._tenant_id,
-            self._session_id,
+        self.manager.add_task_result(
             task_id=task_id,
             content=content,
             result=result,
+            tenant_id=tenant,
+            session_id=sess,
+            message_seq=message_seq,
+            request_id=request_id,
+            envelope_id=envelope_id,
+            mem_tier=mem_tier,
+            extra=extra,
         )
-        # 同步维护兼容视图
-        self.history[task_id] = {"content": content, "result": result, "timestamp": time.time()}
 
-    async def get(self, task_id: str):
-        rec = await self.manager.get_task_result(self._tenant_id, self._session_id, task_id)
-        return rec
+        # 兼容：history 里也放一份（仅当前 adapter 视角）
+        self.history[task_id] = {"content": content, "result": result, "timestamp": _now()}
+
+    def get(
+        self,
+        task_id: str,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        mem_tier: str = "hot",
+    ):
+        tenant = tenant_id or self._tenant_id
+        sess = session_id or self._session_id or f"sess_{task_id}"
+        return self.manager.get_task_result(task_id, tenant_id=tenant, session_id=sess, mem_tier=mem_tier)
