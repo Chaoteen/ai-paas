@@ -2,52 +2,178 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-Handler = Union[
-    Callable[[Dict[str, Any]], Any],                          # sync handler(ctx)
-    Callable[[Dict[str, Any]], Awaitable[Any]],               # async handler(ctx)
-]
+Handler = Callable[[Dict[str, Any]], Any]
 
 
-@dataclass(frozen=True)
-class BusMessage:
+# ==========================================================
+# 标准化 Envelope / Context（与 redis_bus.py 对齐）
+# ==========================================================
+class StandardizedMessageProcessor:
     """
-    Agent Core 内部总线的标准消息结构（建议）
+    标准化 envelope（内存版与 Redis 版保持一致）:
+
+    {
+      "topic": "...",
+      "data": {...},
+      "timestamp": ...,
+      "message_id": "...",
+
+      "tenant_id": "...",
+      "session_id": "...",
+      "task_id": "...",
+      "message_seq": ...,
+      "request_id": "...",
+      "envelope_id": "...",
+
+      "metadata": {...}
+    }
+
+    processing_context:
+    {
+      "envelope": <envelope dict>,
+      "topic": "...",
+      "raw_data": ...,
+      "metadata": {...},
+
+      "tenant_id": ...,
+      "session_id": ...,
+      "task_id": ...,
+      "message_seq": ...,
+      "request_id": ...,
+      "envelope_id": ...,
+
+      "bus_message_id": <message_id>,
+    }
     """
-    topic: str
-    envelope: Dict[str, Any]
-    published_at: float
+
+    @staticmethod
+    def _safe_dict(x: Any) -> Dict[str, Any]:
+        return x if isinstance(x, dict) else {}
+
+    @classmethod
+    def _extract_standard_fields(cls, data: Any, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        raw_data = cls._safe_dict(data)
+        metadata = cls._safe_dict(envelope.get("metadata"))
+        user_profile = cls._safe_dict(metadata.get("user_profile"))
+
+        tenant_id = envelope.get("tenant_id") or raw_data.get("tenant_id") or user_profile.get("tenant_id")
+        session_id = envelope.get("session_id") or raw_data.get("session_id")
+        task_id = envelope.get("task_id") or raw_data.get("task_id")
+
+        message_seq = envelope.get("message_seq")
+        if message_seq is None:
+            message_seq = raw_data.get("message_seq", 0)
+
+        request_id = envelope.get("request_id") or raw_data.get("request_id")
+        envelope_id = envelope.get("envelope_id") or raw_data.get("envelope_id")
+
+        return {
+            "tenant_id": tenant_id,
+            "session_id": session_id,
+            "task_id": task_id,
+            "message_seq": int(message_seq or 0),
+            "request_id": request_id,
+            "envelope_id": envelope_id,
+            "metadata": metadata,
+        }
+
+    @classmethod
+    def create_standardized_envelope(
+        cls,
+        topic: str,
+        data: Any,
+        metadata: Optional[dict] = None,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        message_seq: Optional[int] = None,
+        request_id: Optional[str] = None,
+        envelope_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        env: Dict[str, Any] = {
+            "topic": topic,
+            "data": data,
+            "timestamp": float(timestamp if timestamp is not None else time.time()),
+            "message_id": message_id or str(uuid.uuid4()),
+            "metadata": metadata or {},
+        }
+
+        extracted = cls._extract_standard_fields(data, env)
+
+        merged = {
+            "tenant_id": tenant_id if tenant_id is not None else extracted.get("tenant_id"),
+            "session_id": session_id if session_id is not None else extracted.get("session_id"),
+            "task_id": task_id if task_id is not None else extracted.get("task_id"),
+            "message_seq": int(message_seq if message_seq is not None else extracted.get("message_seq") or 0),
+            "request_id": request_id if request_id is not None else extracted.get("request_id"),
+            "envelope_id": envelope_id if envelope_id is not None else extracted.get("envelope_id"),
+        }
+
+        for k, v in merged.items():
+            if v is not None:
+                env[k] = v
+
+        return env
+
+    @classmethod
+    def envelope_to_processing_context(cls, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        topic = envelope.get("topic", "unknown")
+        data = envelope.get("data", {})
+        extracted = cls._extract_standard_fields(data, envelope)
+
+        # 内存 bus 没有 stream_message_id，用 message_id 代替
+        bus_message_id = envelope.get("message_id") or str(uuid.uuid4())
+        task_id = extracted.get("task_id") or f"legacy_{bus_message_id}"
+
+        return {
+            "envelope": envelope,
+            "topic": topic,
+            "raw_data": data,
+            "metadata": extracted["metadata"],
+            "tenant_id": extracted.get("tenant_id"),
+            "session_id": extracted.get("session_id"),
+            "task_id": task_id,
+            "message_seq": extracted.get("message_seq", 0),
+            "request_id": extracted.get("request_id"),
+            "envelope_id": extracted.get("envelope_id"),
+            "bus_message_id": bus_message_id,
+        }
 
 
+# ==========================================================
+# 内存队列 BUS（最终版）
+# ==========================================================
 class MessageBus:
     """
-    agent_core 的 in-memory message bus（最终版）
+    agent_core/envelope_bus.py（最终版）
 
-    目标：
-    - 标准化 envelope 字段（tenant_id/session_id/task_id/request_id/envelope_id）
-    - 支持同步链路：request/response（通过 reply_to + correlation_id）
-    - 兼容历史 callback 模式（message["callback"] 可用）
-    - 兼容历史 publish/subscribe/start 模式
+    - subscribe(topic, handler): handler(ctx)；ctx 为标准 processing_context
+    - publish(topic, data, metadata): 会自动创建标准化 envelope
+    - start(): 启动分发循环（async）
     """
 
     _instance: Optional["MessageBus"] = None
 
     def __init__(self):
         self.subscribers: Dict[str, List[Handler]] = {}
-        self.queue: asyncio.Queue[BusMessage] = asyncio.Queue()
+        self.queue: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
+        self.processor = StandardizedMessageProcessor()
 
-        # request/response 等待表：correlation_id -> Future
-        self._pending: Dict[str, asyncio.Future] = {}
-
-        self._running: bool = False
+        self._running = False
+        self._dispatcher_task: Optional[asyncio.Task] = None
 
     @classmethod
     def get_instance(cls) -> "MessageBus":
@@ -55,184 +181,115 @@ class MessageBus:
             cls._instance = MessageBus()
         return cls._instance
 
-    # --------------------------------------------------
-    # Subscribe
-    # --------------------------------------------------
-    def subscribe(self, topic: str, handler: Handler):
+    def subscribe(self, topic: str, handler: Handler) -> None:
         """
-        handler(ctx) 形式，ctx 是 processing_context/envelope 的 dict
+        注册 handler。handler 入参统一为 processing_context(dict)
         """
         if topic not in self.subscribers:
             self.subscribers[topic] = []
         self.subscribers[topic].append(handler)
-        logger.info("✅ Subscribed to topic=%s handlers=%d", topic, len(self.subscribers[topic]))
+        logger.info("✅ Subscribed: topic=%s handlers=%d", topic, len(self.subscribers[topic]))
 
-    # --------------------------------------------------
-    # Publish
-    # --------------------------------------------------
-    async def publish(self, topic: str, message: Dict[str, Any]):
+    async def publish(
+        self,
+        topic: str,
+        data: Any,
+        metadata: Optional[dict] = None,
+        *,
+        tenant_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        message_seq: Optional[int] = None,
+        request_id: Optional[str] = None,
+        envelope_id: Optional[str] = None,
+    ) -> str:
         """
-        发布消息：message 建议是标准 envelope
+        发布消息：写入内存队列
+        返回 message_id
         """
-        standardized = self._ensure_standard_fields(message)
-        await self.queue.put(BusMessage(topic=topic, envelope=standardized, published_at=time.time()))
-        logger.debug("📨 Published message topic=%s envelope_id=%s", topic, standardized.get("envelope_id"))
+        env = self.processor.create_standardized_envelope(
+            topic,
+            data,
+            metadata or {},
+            tenant_id=tenant_id,
+            session_id=session_id,
+            task_id=task_id,
+            message_seq=message_seq,
+            request_id=request_id,
+            envelope_id=envelope_id,
+        )
+        await self.queue.put(env)
 
-    # --------------------------------------------------
-    # Request/Response (同步等待)
-    # --------------------------------------------------
-    async def request(self, topic: str, message: Dict[str, Any], timeout: float = 30.0) -> Any:
+        logger.info(
+            "📨 Published: topic=%s tenant=%s session=%s task=%s request=%s envelope=%s msg_id=%s",
+            topic,
+            env.get("tenant_id", "unknown"),
+            env.get("session_id", "unknown"),
+            env.get("task_id", "unknown"),
+            env.get("request_id", "unknown"),
+            env.get("envelope_id", "unknown"),
+            env.get("message_id"),
+        )
+        return env["message_id"]
+
+    async def start(self) -> None:
         """
-        同步请求：发布到 topic，并等待 reply 返回。
-
-        机制：
-        - 自动生成 correlation_id
-        - 自动设置 reply_to = "__bus_reply__"
-        - 等待 handler 通过 bus.respond(...) 回传，或通过 callback 回传也行（兼容）
-        """
-        correlation_id = f"corr_{uuid.uuid4().hex}"
-        reply_to = "__bus_reply__"
-
-        standardized = self._ensure_standard_fields(message)
-        standardized["correlation_id"] = correlation_id
-        standardized["reply_to"] = reply_to
-
-        loop = asyncio.get_event_loop()
-        fut: asyncio.Future = loop.create_future()
-        self._pending[correlation_id] = fut
-
-        # 兼容旧 callback：如果下游用 callback 回传，也能 resolve
-        async def _callback(result: Any):
-            if not fut.done():
-                fut.set_result(result)
-
-        standardized.setdefault("callback", _callback)
-
-        await self.publish(topic, standardized)
-
-        try:
-            return await asyncio.wait_for(fut, timeout=timeout)
-        finally:
-            self._pending.pop(correlation_id, None)
-
-    async def respond(self, correlation_id: str, payload: Any):
-        """
-        handler 调用：将结果回传给 request()
-        """
-        fut = self._pending.get(correlation_id)
-        if fut and not fut.done():
-            fut.set_result(payload)
-
-    # --------------------------------------------------
-    # Start Loop
-    # --------------------------------------------------
-    async def start(self):
-        """
-        主循环：单协程消费 queue，然后派发给对应 handlers。
+        启动分发循环（如果你已有主循环，建议 create_task(bus.start())）
         """
         if self._running:
-            logger.warning("MessageBus already running")
+            logger.warning("⚠️ MessageBus already running")
             return
 
         self._running = True
-        logger.info("🚀 MessageBus started and waiting for messages...")
+        self._dispatcher_task = asyncio.create_task(self._dispatch_loop())
+        logger.info("🚀 MessageBus started")
 
-        while self._running:
-            msg: BusMessage = await self.queue.get()
-            topic = msg.topic
-            envelope = msg.envelope
-
-            handlers = self.subscribers.get(topic, [])
-            if not handlers:
-                logger.warning("⚠️ No handlers for topic=%s", topic)
-                self.queue.task_done()
-                continue
-
-            # 逐个 handler 尝试执行：一个成功即认为处理完成
-            handled = False
-            last_err: Optional[Exception] = None
-
-            for handler in handlers:
-                try:
-                    if asyncio.iscoroutinefunction(handler):
-                        # async handler
-                        result = await handler(envelope)
-                    else:
-                        # sync handler
-                        result = handler(envelope)
-
-                    handled = True
-
-                    # 如果是 request 模式，自动回传（当 handler return 非 None 时）
-                    correlation_id = envelope.get("correlation_id")
-                    reply_to = envelope.get("reply_to")
-                    if correlation_id and reply_to == "__bus_reply__" and result is not None:
-                        await self.respond(correlation_id, result)
-
-                    break
-
-                except Exception as e:
-                    last_err = e
-                    logger.exception("❌ Handler error topic=%s err=%s", topic, e)
-
-            if not handled:
-                logger.error("❌ All handlers failed topic=%s last_err=%s", topic, last_err)
-
-            self.queue.task_done()
-
-    async def stop(self):
+    async def stop(self) -> None:
+        """
+        停止分发循环
+        """
         self._running = False
+        if self._dispatcher_task:
+            self._dispatcher_task.cancel()
+            try:
+                await self._dispatcher_task
+            except asyncio.CancelledError:
+                pass
+            self._dispatcher_task = None
+        logger.info("🛑 MessageBus stopped")
 
-    # --------------------------------------------------
-    # Helpers
-    # --------------------------------------------------
-    def _ensure_standard_fields(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        确保 envelope 带齐标准字段（多租户/ABAC 透传一致性）
-        """
-        if not isinstance(envelope, dict):
-            return {"data": envelope}
+    async def _dispatch_loop(self) -> None:
+        while self._running:
+            env = await self.queue.get()
+            try:
+                ctx = self.processor.envelope_to_processing_context(env)
+                topic = ctx["topic"]
+                handlers = self.subscribers.get(topic, [])
 
-        data = envelope.get("data", {}) if isinstance(envelope.get("data"), dict) else {}
+                if not handlers:
+                    logger.warning("⚠️ No handlers for topic=%s (msg_id=%s)", topic, ctx.get("bus_message_id"))
+                    continue
 
-        # tenant/session/task/request/envelope 的透传优先级：envelope > data > metadata.user_profile
-        metadata = envelope.get("metadata", {}) if isinstance(envelope.get("metadata"), dict) else {}
-        user_profile = metadata.get("user_profile", {}) if isinstance(metadata.get("user_profile"), dict) else {}
+                # 约定：按注册顺序依次尝试；第一个成功即认为消费成功
+                for handler in handlers:
+                    try:
+                        if asyncio.iscoroutinefunction(handler):
+                            await handler(ctx)
+                        else:
+                            handler(ctx)
+                        break
+                    except Exception as e:
+                        logger.error("❌ Handler failed topic=%s err=%s", topic, e)
+                        # 尝试下一个 handler
+                        continue
+            finally:
+                self.queue.task_done()
 
-        tenant_id = envelope.get("tenant_id") or data.get("tenant_id") or user_profile.get("tenant_id")
-        session_id = envelope.get("session_id") or data.get("session_id")
-        task_id = envelope.get("task_id") or data.get("task_id")
-        message_seq = envelope.get("message_seq")
-        if message_seq is None:
-            message_seq = data.get("message_seq", 0)
-
-        request_id = envelope.get("request_id") or data.get("request_id")
-        envelope_id = envelope.get("envelope_id") or data.get("envelope_id")
-
-        # 补齐
-        if tenant_id is not None:
-            envelope["tenant_id"] = tenant_id
-        if session_id is not None:
-            envelope["session_id"] = session_id
-        if task_id is not None:
-            envelope["task_id"] = task_id
-        envelope["message_seq"] = int(message_seq or 0)
-
-        if request_id is not None:
-            envelope["request_id"] = request_id
-        if envelope_id is not None:
-            envelope["envelope_id"] = envelope_id
-
-        # 默认生成 envelope_id（便于追踪）
-        if "envelope_id" not in envelope or not envelope.get("envelope_id"):
-            envelope["envelope_id"] = f"env_{uuid.uuid4().hex}"
-
-        # 默认 message_id
-        if "message_id" not in envelope or not envelope.get("message_id"):
-            envelope["message_id"] = f"msg_{uuid.uuid4().hex}"
-
-        # 默认 timestamp
-        if "timestamp" not in envelope:
-            envelope["timestamp"] = time.time()
-
-        return envelope
+    def get_bus_stats(self) -> Dict[str, Any]:
+        return {
+            "type": "memory_bus",
+            "running": self._running,
+            "topics_registered": list(self.subscribers.keys()),
+            "total_handlers": sum(len(v) for v in self.subscribers.values()),
+            "queue_size": self.queue.qsize(),
+        }
