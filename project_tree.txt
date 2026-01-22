@@ -1,0 +1,143 @@
+.
+├── agent_core
+│   ├── Router_bridge的作用说明.txt
+│   ├── __init__.py
+│   ├── agent.txt
+│   ├── agent说明.docx
+│   ├── analyze_models.py
+│   ├── checkmodel.py
+│   ├── config.yaml.txt
+│   ├── core.py
+│   ├── envelope_bus.py
+│   ├── logs
+│   │   └── redis_bus.log
+│   ├── memory.py
+│   ├── reasoning.py
+│   ├── redis_bus.py
+│   ├── redis_bus的说明.txt
+│   ├── redis和agent启动方式.txt
+│   ├── router_bridge.py
+│   ├── run_bus.py
+│   ├── skills
+│   │   ├── __init__.py
+│   │   └── base_skills.py
+│   └── 启动和关闭deepseek.txt
+├── aios_sdk
+│   ├── __init__.py
+│   ├── agent_pb2.py
+│   ├── agent_pb2_grpc.py
+│   ├── aios_platform_test.py
+│   ├── aios_sdk
+│   │   └── grpc
+│   │       ├── __init__.py
+│   │       ├── agent_pb2_grpc.py
+│   │       ├── envelope_pb2_grpc.py
+│   │       ├── inference_pb2_grpc.py
+│   │       ├── langgraph_pb2_grpc.py
+│   │       ├── model_pb2_grpc.py
+│   │       ├── policy_pb2_grpc.py
+│   │       ├── prompt_pb2_grpc.py
+│   │       └── vector_pb2_grpc.py
+│   ├── complete_test.py
+│   ├── envelope_pb2.py
+│   ├── envelope_pb2_grpc.py
+│   ├── example_usage.py
+│   ├── final_test.py
+│   ├── inference_pb2.py
+│   ├── inference_pb2_grpc.py
+│   ├── langgraph_pb2.py
+│   ├── langgraph_pb2_grpc.py
+│   ├── model_pb2.py
+│   ├── model_pb2_grpc.py
+│   ├── policy_pb2.py
+│   ├── policy_pb2_grpc.py
+│   ├── prompt_pb2.py
+│   ├── prompt_pb2_grpc.py
+│   ├── setup.py
+│   ├── vector_pb2.py
+│   ├── vector_pb2_grpc.py
+│   └── working_test.py
+├── app.py
+├── control_plane
+│   ├── context.py
+│   ├── decision.py
+│   ├── policy_client.py
+│   ├── policy_engine.py
+│   ├── prompt_execution_gateway.py
+│   └── 架构信息.txt
+├── data_plane
+│   ├── __init__.py
+│   ├── adapters
+│   │   ├── __init__.py
+│   │   ├── agent_adapter.py
+│   │   ├── agent_core_adapter.py
+│   │   ├── model_adapter.py.txt
+│   │   ├── promptflow_adapter.py
+│   │   ├── redis_client.py
+│   │   └── redis_stream_adapter.py.txt
+│   ├── dispatcher.py
+│   ├── envelope.py
+│   ├── handlers
+│   │   ├── __init__.py
+│   │   ├── agent_handler.py
+│   │   ├── model_handler.py
+│   │   └── promptflow_handler.py
+│   ├── legacy
+│   │   ├── __init__.py
+│   │   └── router_bridge_adapter.py
+│   ├── result.py
+│   └── router.py
+├── flowise
+│   ├── README.md.txt
+│   ├── config
+│   │   └── custom-nodes
+│   │       └── httpGatewayNode.js
+│   ├── docker-compose.yml
+│   └── flowise_manager.py
+├── gateway
+│   ├── Dockerfile
+│   ├── __init__.py
+│   ├── docker-compose.yml
+│   ├── prompt_execution_gateway.py
+│   └── requirements.txt
+├── generate_grpc_sdk.py
+├── generate_sdk.py
+├── langgraph
+│   └── langgraph_grpc_server.py
+├── project_tree.txt
+├── promptflow
+│   ├── PromptFlow服务部署与集成文档.docx
+│   ├── pf_client.py
+│   ├── promptflow产品文档.docx
+│   └── test_flow
+│       ├── flow.dag.yaml
+│       ├── greet.py
+│       └── test_pf_service.py
+├── proto
+│   ├── agent.proto
+│   ├── envelope.proto
+│   ├── fix_proto_precise.sh
+│   ├── fix_proto_step2.sh
+│   ├── inference.proto
+│   ├── langgraph.proto
+│   ├── model.proto
+│   ├── policy.proto
+│   ├── prompt.proto
+│   ├── proto生成SDK方法.txt
+│   └── vector.proto
+├── run_ai_platform.sh
+└── services
+    └── server
+        ├── agent_manager.py
+        ├── agent_registry.py
+        ├── agent_service.py
+        ├── deepseek_service.py
+        ├── deepseek_service.py.txt
+        ├── model_service.py
+        ├── start_agent_system.py
+        ├── task_manager.py
+        ├── test_client.py
+        ├── 工作日志.txt
+        └── 请求到agent再到模型的链路.txt
+
+22 directories, 119 files
