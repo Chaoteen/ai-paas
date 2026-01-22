@@ -15,15 +15,18 @@ import grpc
 import redis.asyncio as redis
 
 # =========================
-# Path bootstrap（按你的工程）
+# Path bootstrap (portable)
 # =========================
-# 添加项目根目录到Python路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# project root = .../ai-paas
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
-# 添加 aios_sdk 路径（按你给的路径）
-aios_sdk_path = "/mnt/d/RD/ai-os/aios_sdk"
-if os.path.exists(aios_sdk_path):
-    sys.path.insert(0, aios_sdk_path)
+# Optional override: if you keep a separate SDK path, allow env var
+# Example: export AIOS_SDK_PATH=/some/path/aios_sdk
+AIOS_SDK_PATH = os.getenv("AIOS_SDK_PATH", "")
+if AIOS_SDK_PATH and os.path.exists(AIOS_SDK_PATH) and AIOS_SDK_PATH not in sys.path:
+    sys.path.insert(0, AIOS_SDK_PATH)
 
 # aios_sdk（gRPC stub）
 try:
@@ -146,7 +149,7 @@ class RouterBridge:
         user_profile = {k: v for k, v in user_profile.items() if v is not None}
 
         agent_profile = {
-            "subscribed_agents": data.get("subscribed_agents", ["agent.default"]),
+            "subscribed_agents": data.get("subscribed_agents", ["deepseek-r1:latest"]),
             "routing_policy": data.get("routing_policy", "langgraph_priority"),
             "model_policy": {
                 "default_model": data.get("model", "qwen-8b"),
@@ -263,7 +266,7 @@ class RouterBridge:
 
         # 优先 subscribed_agents
         subs = metadata.get("agent_profile", {}).get("subscribed_agents") or []
-        if subs and subs != ["agent.default"]:
+        if subs and subs != ["deepseek-r1:latest"]:
             if task_type:
                 candidate = f"agent.{task_type}"
                 if candidate in subs:
@@ -274,16 +277,16 @@ class RouterBridge:
         if task_type in ["translate", "translation"]:
             return "agent.translate"
         if task_type in ["summarize", "summary"]:
-            return "agent.summary"
+            return "deepseek-r1:latest"
         if task_type in ["rewrite", "rewriting"]:
             return "agent.rewrite"
         if task_type in ["code", "programming"]:
             return "agent.code"
         if task_type in ["analyze", "analysis"]:
-            return "agent.analyze"
+            return "deepseek-r1:latest"
 
         if "总结" in content or "summary" in content:
-            return "agent.summary"
+            return "deepseek-r1:latest"
         if "翻译" in content or "translate" in content:
             return "agent.translate"
         if "改写" in content or "rewrite" in content:
@@ -291,9 +294,9 @@ class RouterBridge:
         if "代码" in content or "program" in content:
             return "agent.code"
         if "分析" in content or "analy" in content:
-            return "agent.analyze"
+            return "deepseek-r1:latest"
 
-        return "agent.default"
+        return "deepseek-r1:latest"
 
     # ---------- Core route ----------
     async def _route_to_target(
