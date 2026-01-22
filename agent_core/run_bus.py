@@ -12,14 +12,9 @@ import redis.asyncio as redis
 import json
 import time
 
-# 👇 修复模块导入路径
-AGENT_CORE_PATH = "/mnt/d/RD/ai-os/agent_core"
-if AGENT_CORE_PATH not in sys.path:
-    sys.path.insert(0, AGENT_CORE_PATH)
-
-# 现在可以安全导入 redis_bus.py
+# 直接从当前工程导入 redis_bus（迁移到 ai-paas 后不再注入旧路径）
 try:
-    from redis_bus import create_standardized_message_bus, RedisBackedEnvelopeBUS
+    from redis_bus import create_message_bus, RedisBackedEnvelopeBUS
 except ModuleNotFoundError as e:
     print(f"❌ 模块导入失败，请检查路径: {e}")
     print(f"🔍 当前 sys.path: {sys.path}")
@@ -169,7 +164,7 @@ async def main():
 
     # 🎯 使用新的标准化工厂函数创建总线实例
     try:
-        bus = create_standardized_message_bus(
+        bus = create_message_bus(
             redis_url=redis_url,
             stream_name=stream_name,
             consumer_group=consumer_group,
