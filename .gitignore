@@ -30,3 +30,4 @@ pids/
 
 # --- Local test artifacts / temp ---
 *.diff
+ops/env/proxy.env
