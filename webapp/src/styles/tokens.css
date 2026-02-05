@@ -1,0 +1,52 @@
+:root {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Dark (default) — OpenAI-ish */
+  --bg: #0b0f17;
+  --panel: #0f1522;
+  --panel-2: #121a2a;
+  --muted: #8892a6;
+  --text: #e8ecf5;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --border-2: rgba(255, 255, 255, 0.12);
+
+  --primary: #6ea8ff;
+  --primary-2: #2b67ff;
+  --danger: #ff6b6b;
+  --warning: #ffcc66;
+  --success: #4ade80;
+
+  --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  --ring: 0 0 0 3px rgba(110, 168, 255, 0.25);
+
+  --z-topbar: 50;
+  --z-sidebar: 40;
+  --z-modal: 100;
+}

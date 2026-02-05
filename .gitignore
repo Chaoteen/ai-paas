@@ -57,3 +57,6 @@ __pycache__/
 *.pyd
 .env
 .env.*
+
+# local dev junk
+run_ai_platform_v2.sh.bak.*
