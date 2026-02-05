@@ -1,0 +1,17 @@
+services:
+  promptflow:
+    image: python:3.10-slim
+    container_name: ai-paas-promptflow
+    working_dir: /app
+    volumes:
+      - ../../promptflow/test_flow:/app/flow:ro
+    ports:
+      - "8080:8080"
+    environment:
+      - PF_DISABLE_TELEMETRY=1
+    command: >
+      bash -lc "
+        pip install -U pip &&
+        pip install 'promptflow>=1.8.0' &&
+        pf flow serve --source /app/flow --host 0.0.0.0 --port 8080
+      "

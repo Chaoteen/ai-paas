@@ -4,7 +4,7 @@ package ui
 default allow = false
 
 # ---- Admin-only menus ----
-admin_only_menu_ids := {"admin", "workflows", "promptflow", "langgraph"}
+admin_only_menu_ids := {"admin", "workflows", "flowise", "promptflow", "langgraph", "opa"}
 
 allow if {
   input.resource.type == "menu"
