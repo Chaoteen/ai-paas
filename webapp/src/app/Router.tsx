@@ -13,12 +13,12 @@ export function AppRouter() {
       <Route path="/chat" element={<Chat />} />
       <Route path="/admin" element={<Admin />} />
       <Route path="/opa" element={<OpaConsole />} />
-      {/* iframe-first plugin host */}
-      <Route path="/plugin" element={<PluginPage />} />
+
+      {/* plugin host */}
+      <Route path="/plugins/:pluginId" element={<PluginPage />} />
 
       {/* fallback */}
       <Route path="*" element={<Navigate to="/chat" replace />} />
-          <Route path="/plugins/:pluginId" element={<PluginPage />} />
     </Routes>
   );
 }

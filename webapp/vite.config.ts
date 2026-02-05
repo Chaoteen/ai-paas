@@ -11,14 +11,7 @@ export default defineConfig({
       target: "http://127.0.0.1:8080",
       changeOrigin: true,
       rewrite: (path) => path.replace(/^\/external\/promptflow/, ""),
-    },
-    "/external/langgraph": {
-      target: "http://127.0.0.1:8123",
-      changeOrigin: true,
-      rewrite: (path) => path.replace(/^\/external\/langgraph/, ""),
-    },
-
-      "/api": {
+    },"/api": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
       },

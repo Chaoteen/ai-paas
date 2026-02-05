@@ -7,9 +7,9 @@ default allow = false
 admin_only_menu_ids := {"admin", "workflows", "flowise", "promptflow", "langgraph", "opa"}
 
 allow if {
-  input.resource.type == "menu"
+  input.resource.kind == "menu"
   input.resource.id in admin_only_menu_ids
-  input.subject.is_admin
+  input.user.is_admin
 }
 
 # ---- Normal user menus (explicit allow) ----
@@ -17,7 +17,7 @@ allow if {
 user_menu_ids := {"chat", "history", "settings"}
 
 allow if {
-  input.resource.type == "menu"
+  input.resource.kind == "menu"
   input.resource.id in user_menu_ids
 }
 
