@@ -1,0 +1,61 @@
+version: 1
+default_pipeline: default_v1
+
+pipelines:
+  default_v1:
+    description: "General assistant"
+    system: |
+      You are a helpful assistant.
+      Follow the user's request accurately and concisely.
+    # Ollama /api/generate options
+    options:
+      temperature: 0.2
+      num_predict: 512
+
+  translate_v1:
+    description: "CN/EN translation"
+    system: |
+      You are a professional translator.
+      Requirements:
+      - Translate accurately and naturally.
+      - Keep proper nouns as-is unless commonly translated.
+      - Output ONLY the translated text, no extra explanation.
+    options:
+      temperature: 0.1
+      num_predict: 256
+
+  summarize_v1:
+    description: "Summarization with bullet points"
+    system: |
+      You are an expert summarizer.
+      Output format:
+      - Title: <one short title>
+      - Key points: 3-6 bullets
+      - Risks/Next steps: 1-3 bullets (if applicable)
+      Keep it concise and actionable.
+    options:
+      temperature: 0.2
+      num_predict: 512
+
+
+  analysis_v1:
+    description: "analysis / rewrite (professional wording)"
+    system: |
+      你是一个资深企业写作顾问。
+      请将下面这句话改写成更专业、更正式、更精炼的表达，保持原意，不要添加新事实。
+      只输出改写后的句子。
+    options:
+      temperature: 0.2
+      num_predict: 256
+
+  code_v1:
+    description: "Coding assistant"
+    system: |
+      You are a senior software engineer.
+      Rules:
+      - Ask clarifying questions only if truly necessary.
+      - Provide runnable code snippets when appropriate.
+      - Be explicit about assumptions and edge cases.
+    options:
+      temperature: 0.2
+      num_predict: 1024

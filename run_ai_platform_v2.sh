@@ -16,6 +16,7 @@ LANGGRAPH_PID="$PID_DIR/langgraph.pid"
 ROUTER_BRIDGE_PID="$PID_DIR/router_bridge.pid"
 MODEL_WORKER_PID="$PID_DIR/model_worker.pid"
 AGENT_SYSTEM_PID="$PID_DIR/agent_system.pid"
+PROMPTFLOW_PID="$PID_DIR/promptflow.pid"
 
 # --- ENV（可按需改）---
 export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
@@ -25,8 +26,11 @@ export DEST_STREAM="${DEST_STREAM:-agent.processed.tasks.stream}"
 export RESULT_STREAM="${RESULT_STREAM:-agent.result.stream}"
 
 export LANGGRAPH_SERVICE_URL="${LANGGRAPH_SERVICE_URL:-localhost:50051}"
-export PROMPTFLOW_SERVICE_URL="${PROMPTFLOW_SERVICE_URL:-http://localhost:8081}"
-
+# promptflow (iframe target)
+export PROMPTFLOW_PORT="${PROMPTFLOW_PORT:-8080}"
+export PROMPTFLOW_SERVICE_URL="${PROMPTFLOW_SERVICE_URL:-http://127.0.0.1:${PROMPTFLOW_PORT}}"
+# Optional: if no docker-compose detected, use PROMPTFLOW_CMD to start promptflow process
+export PROMPTFLOW_CMD="${PROMPTFLOW_CMD:-}"
 # model worker
 export MODEL_WORKER_GROUP="${MODEL_WORKER_GROUP:-model_workers}"
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
@@ -34,6 +38,22 @@ export DEFAULT_MODEL_ID="${DEFAULT_MODEL_ID:-deepseek-r1:latest}"
 
 # --- helpers ---
 is_running() { pgrep -f "$1" >/dev/null 2>&1; }
+
+wait_http() {
+  # wait_http <url> <timeout_seconds>
+  local url="$1"
+  local timeout="${2:-20}"
+  local i=0
+  while (( i < timeout )); do
+    if curl -sS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    i=$((i+1))
+  done
+  return 1
+}
+
 
 start_proc() {
   local name="$1"
@@ -103,6 +123,74 @@ status_proc() {
   fi
 }
 
+start_promptflow() {
+  echo "=== 2.5) PromptFlow（iframe 插件） ==="
+
+  # Preferred: docker compose if present
+  local compose1="$SCRIPT_DIR/ops/promptflow/docker-compose.yml"
+  local compose2="$SCRIPT_DIR/promptflow/docker-compose.yml"
+
+  if [[ -f "$compose1" ]]; then
+    echo "🚀 启动 PromptFlow (docker compose: ops/promptflow) ..."
+    (cd "$(dirname "$compose1")" && docker compose up -d)
+  elif [[ -f "$compose2" ]]; then
+    echo "🚀 启动 PromptFlow (docker compose: promptflow) ..."
+    (cd "$(dirname "$compose2")" && docker compose up -d)
+  elif [[ -n "${PROMPTFLOW_CMD:-}" ]]; then
+    start_proc \
+      "PromptFlow服务" \
+      "$SCRIPT_DIR" \
+      "$PROMPTFLOW_CMD" \
+      "$PROMPTFLOW_PID" \
+      "$LOG_DIR/promptflow.log" \
+      "$PROMPTFLOW_CMD" \
+      3 || true
+  else
+    echo "⚠️ 未找到 PromptFlow docker-compose.yml，且未设置 PROMPTFLOW_CMD，跳过启动 PromptFlow"
+    echo "   你可以："
+    echo "   1) 放置 docker compose 文件到 ops/promptflow/docker-compose.yml 或 promptflow/docker-compose.yml"
+    echo "   2) 或 export PROMPTFLOW_CMD='你的启动命令' 让脚本托管进程"
+    return 0
+  fi
+
+  # Health check
+  if wait_http "http://127.0.0.1:${PROMPTFLOW_PORT}/swagger.json" 20; then
+    echo "✅ PromptFlow 已就绪: http://127.0.0.1:${PROMPTFLOW_PORT}"
+  else
+    echo "❌ PromptFlow 未就绪（端口 ${PROMPTFLOW_PORT} 20秒内不可达）"
+    echo "   建议查看：logs/promptflow.log 或 docker logs"
+  fi
+}
+
+stop_promptflow() {
+  echo "🛑 停止 PromptFlow ..."
+  local compose1="$SCRIPT_DIR/ops/promptflow/docker-compose.yml"
+  local compose2="$SCRIPT_DIR/promptflow/docker-compose.yml"
+
+  if [[ -f "$compose1" ]]; then
+    (cd "$(dirname "$compose1")" && docker compose down) || true
+    echo "✅ PromptFlow docker compose 已停止"
+    return 0
+  fi
+  if [[ -f "$compose2" ]]; then
+    (cd "$(dirname "$compose2")" && docker compose down) || true
+    echo "✅ PromptFlow docker compose 已停止"
+    return 0
+  fi
+
+  # If started as process
+  stop_proc "PromptFlow服务" "$PROMPTFLOW_PID" "${PROMPTFLOW_CMD:-promptflow}"
+}
+
+status_promptflow() {
+  if curl -sS "http://127.0.0.1:${PROMPTFLOW_PORT}/swagger.json" >/dev/null 2>&1; then
+    echo "✅ PromptFlow 正在运行 (http://127.0.0.1:${PROMPTFLOW_PORT})"
+  else
+    echo "❌ PromptFlow 未运行 (http://127.0.0.1:${PROMPTFLOW_PORT} 不可达)"
+  fi
+}
+
+
 start_all() {
   echo "🎯 启动 AI PaaS（v2 多租户+ABAC）..."
 
@@ -129,6 +217,8 @@ start_all() {
   else
     echo "⚠️ 未找到 langgraph/langgraph_grpc_server.py，跳过"
   fi
+
+  start_promptflow
 
   echo "=== 3) RouterBridge ==="
   start_proc \
@@ -168,6 +258,8 @@ start_all() {
   echo "📊 服务状态："
   status_proc "Redis消息总线" "run_bus.py"
   status_proc "LangGraph服务" "langgraph_grpc_server.py"
+  status_promptflow
+  status_promptflow
   status_proc "RouterBridge" "router_bridge.py"
   status_proc "ModelWorker" "workers/model_worker.py"
   status_proc "Agent系统" "start_agent_system.py"
@@ -191,6 +283,8 @@ status_all() {
   echo "📊 AI PaaS（v2）状态："
   status_proc "Redis消息总线" "run_bus.py"
   status_proc "LangGraph服务" "langgraph_grpc_server.py"
+  status_promptflow
+  status_promptflow
   status_proc "RouterBridge" "router_bridge.py"
   status_proc "ModelWorker" "workers/model_worker.py"
   status_proc "Agent系统" "start_agent_system.py"

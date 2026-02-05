@@ -223,7 +223,11 @@ async def main():
     connected = False
     for i in range(5):
         try:
-            await bus.start(use_streams=True)
+            try:
+                await bus.start()
+            except TypeError:
+                await bus.start(use_streams=True)
+
             connected = True
             logger.info("✅ Redis标准化消息总线已启动")
             break
