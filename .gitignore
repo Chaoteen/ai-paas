@@ -31,3 +31,29 @@ pids/
 # --- Local test artifacts / temp ---
 *.diff
 ops/env/proxy.env
+
+# --- Local backups / patches ---
+.patch_backups/
+*.bak
+*.bak_*
+*.swp
+*.tmp
+
+# --- Webapp (Vite/Node) ---
+webapp/node_modules/
+webapp/.vite/
+webapp/dist/
+webapp/build/
+webapp/.cache/
+webapp/*.log
+webapp/npm-debug.log*
+webapp/yarn-debug.log*
+webapp/yarn-error.log*
+
+# --- Python / general ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.*
