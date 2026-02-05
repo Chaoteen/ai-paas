@@ -1,0 +1,39 @@
+menus:
+  - id: chat
+    title: 对话
+    icon: chat
+    route: /chat
+    capability: chat
+
+  - id: workflows
+    title: 工作流
+    icon: workflow
+    children:
+      - id: flowise
+        title: Flowise
+        type: iframe
+        url: http://127.0.0.1:3000
+        capability: external.flowise
+      - id: promptflow
+        title: PromptFlow
+        type: iframe
+        url: /external/promptflow
+        capability: external.promptflow
+      - id: langgraph
+        title: LangGraph
+        type: iframe
+        url: /external/langgraph
+        capability: external.langgraph
+
+  - id: admin
+    title: 管理
+    icon: settings
+    route: /admin
+    capability: admin.root
+
+    children:
+      - id: opa
+        title: OPA
+        icon: shield
+        route: /opa
+        capability: admin.root

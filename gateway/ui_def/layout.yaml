@@ -1,0 +1,8 @@
+layout:
+  default_route: /chat
+  sidebar:
+    collapsible: true
+
+features:
+  enable_admin_switch: true
+  enable_streaming: true

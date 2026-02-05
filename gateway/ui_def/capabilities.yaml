@@ -1,0 +1,20 @@
+capabilities:
+  chat:
+    modes: ["sync", "stream"]
+    supports: ["markdown", "code"]
+    history: true
+
+  external.flowise:
+    type: iframe
+    target: flowise
+
+  external.promptflow:
+    type: iframe
+    target: promptflow
+
+  external.langgraph:
+    type: iframe
+    target: langgraph
+
+  admin.root:
+    actions: ["view"]
