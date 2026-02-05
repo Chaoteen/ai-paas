@@ -1,0 +1,32 @@
+rules:
+  - match:
+      task_type_in: ["translate", "translation"]
+      contains_any: ["翻译", "translate"]
+    target_agent: "deepseek-r1:latest"
+    pipeline_id: "translate_v1"
+    confidence: 0.95
+    strategy: "rule.translate"
+
+  - match:
+      task_type_in: ["summarize", "summary"]
+      contains_any: ["总结", "summary", "tl;dr", "概括"]
+    target_agent: "deepseek-r1:latest"
+    pipeline_id: "summarize_v1"
+    confidence: 0.90
+    strategy: "rule.summarize"
+
+  - match:
+      task_type_in: ["code", "programming"]
+      contains_any: ["代码", "bug", "报错", "traceback", "exception", "stack", "编译", "运行"]
+    target_agent: "deepseek-r1:latest"
+    pipeline_id: "code_v1"
+    confidence: 0.90
+    strategy: "rule.code"
+
+  - match:
+      task_type_in: ["analyze", "analysis"]
+      contains_any: ["分析", "评估", "对比", "可行性", "结论", "建议"]
+    target_agent: "deepseek-r1:latest"
+    pipeline_id: "analysis_v1"
+    confidence: 0.85
+    strategy: "rule.analysis"
