@@ -241,10 +241,10 @@ start_all() {
     3
 
   echo "=== 5) AgentSystem（可选） ==="
-  if [[ -f "$SCRIPT_DIR/server/start_agent_system.py" ]]; then
+  if [[ -f "$SCRIPT_DIR/services/server/start_agent_system.py" ]]; then
     start_proc \
       "Agent系统" \
-      "$SCRIPT_DIR/server" \
+      "$SCRIPT_DIR/services/server" \
       "python start_agent_system.py" \
       "$AGENT_SYSTEM_PID" \
       "$LOG_DIR/agent_system.log" \
