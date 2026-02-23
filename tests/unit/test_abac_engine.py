@@ -47,10 +47,10 @@ class ABACEngine:
                 if key not in resource or resource[key] not in allowed_values:
                     return False
         
+        
         # 检查动作条件
-        if policy.action_conditions:
-            allowed_actions = policy.action_conditions.get("action", [])
-            if action not in allowed_actions:
+        if policy.actions:
+            if action not in policy.actions:
                 return False
         
         # 检查环境条件
@@ -155,11 +155,10 @@ class TestABACEngine:
         deny_policy = ABACPolicy(
             id="test-deny-policy",
             name="Deny Confidential Access",
-            policy_type="access_control",
             effect="deny",
             subject_conditions={"auth_level": ["basic"]},
             resource_conditions={"sensitivity": ["confidential"]},
-            action_conditions={"action": ["read", "write", "delete"]},
+            actions=["read", "write", "delete"],
             environment_conditions={}
         )
         
@@ -180,11 +179,11 @@ class TestABACEngine:
         allow_policy = ABACPolicy(
             id="priority-allow",
             name="Allow Developers",
-            policy_type="access_control",
+            
             effect="allow",
             subject_conditions={"role": ["developer"]},
             resource_conditions={"sensitivity": ["internal", "confidential"]},
-            action_conditions={"action": ["read"]},
+            actions=["read"],
             environment_conditions={},
             priority=1,
             is_active=True
@@ -193,11 +192,11 @@ class TestABACEngine:
         deny_policy = ABACPolicy(
             id="priority-deny",
             name="Deny External Users",
-            policy_type="access_control",
+            
             effect="deny",
             subject_conditions={"department": ["External"]},
             resource_conditions={"sensitivity": ["confidential"]},
-            action_conditions={"action": ["read"]},
+            actions=["read"],
             environment_conditions={},
             priority=10,  # 更高优先级
             is_active=True
@@ -244,5 +243,5 @@ class TestABACAttributes:
         """测试策略条件 JSON"""
         assert isinstance(test_abac_policy.subject_conditions, dict)
         assert isinstance(test_abac_policy.resource_conditions, dict)
-        assert isinstance(test_abac_policy.action_conditions, dict)
+        assert isinstance(test_abac_policy.actions, list)
         assert isinstance(test_abac_policy.environment_conditions, dict)
