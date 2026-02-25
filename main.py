@@ -9,6 +9,7 @@ from config.settings import settings
 from models.database import engine, Base
 from api.v1 import api_v1_router
 from middleware.jwt_auth import JWTAuthMiddleware
+from api.v1 import agents
 
 
 @asynccontextmanager
@@ -50,6 +51,7 @@ app.add_middleware(
 
 # 包含 API 路由
 app.include_router(api_v1_router)
+app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
 
 
 # 健康检查端点

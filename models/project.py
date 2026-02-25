@@ -102,11 +102,11 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan"
     )
-    agents: Mapped[List["Agent"]] = relationship(
-        "Agent",
-        back_populates="project",
-        cascade="all, delete-orphan"
-    )
+# DISABLED: Agent is Org-level asset.     agents: Mapped[List["Agent"]] = relationship(
+# #         "Agent",
+# #         back_populates="project",
+# #         cascade="all, delete-orphan"
+# #     )
     conversations: Mapped[List["Conversation"]] = relationship(
         "Conversation",
         back_populates="project",

@@ -5,7 +5,7 @@ AI-PaaS 数据模型注册表
 from .base import Base
 from .auth import User, Organization, OrganizationMember, APIKey
 from .project import Project, Environment, Integration
-from .agent import Agent, Tool, WorkflowNode, WorkflowEdge
+from .agent import Agent  # 暂时只导入 Agent，其他模型 (Tool, Workflow...) 待补充
 from .conversation import Conversation, Message, Feedback
 from .prompt import PromptTemplate, TemplateVersion
 from .billing import UsageRecord, Quota
@@ -36,9 +36,9 @@ __all__ = [
     "Integration",
     # Agent 模型
     "Agent",
-    "Tool",
-    "WorkflowNode",
-    "WorkflowEdge",
+    # "{item}",  # Temporarily disabled
+    # "{item}",  # Temporarily disabled
+    # "{item}",  # Temporarily disabled
     # Conversation 模型
     "Conversation",
     "Message",
