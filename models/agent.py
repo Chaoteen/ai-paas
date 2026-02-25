@@ -10,6 +10,10 @@ if TYPE_CHECKING:
 
 from .base import Base
 
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from uuid import UUID
+
 class AgentStatus(str, enum.Enum):
     DRAFT = "draft"
     ACTIVE = "active"

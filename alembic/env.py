@@ -1,32 +1,49 @@
+# /home/boris/work/ai-paas/alembic/env.py
+import os
+import sys
 from logging.config import fileConfig
+
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
-from alembic import context
-import sys
-import os
 
-# 添加项目路径
+from alembic import context
+
+# 添加项目根目录到 Python 路径，确保能导入 models
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 导入所有模型
-from models.base import Base
-from models.auth import User, Organization, OrganizationMember, APIKey
-from models.project import Project, Environment, Integration
-from models.agent import Agent, Tool, WorkflowNode, WorkflowEdge
-from models.conversation import Conversation, Message, Feedback
-from models.abac import ABACPolicy, PolicyAssignment, PolicyEvaluationLog
-from models.billing import UsageRecord, Quota
-from models.audit import AuditLog, SystemSetting, FeatureFlag
-from models.prompt import PromptTemplate, TemplateVersion
-
+# this is the Alembic Config object, which provides
+# access to the values within the .ini file in use.
 config = context.config
 
+# Interpret the config file for Python logging.
+# This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+# add your model's MetaData object here
+# for 'autogenerate' support
+# from myapp import mymodel
+# target_metadata = mymodel.Base.metadata
+
+# 【关键修改】自动导入 models 包中的所有模型，避免硬编码导入错误
+try:
+    from models.base import Base
+    # 导入 __init__.py 会触发所有子模块的加载，从而注册所有模型到 Base.metadata
+    import models 
+    target_metadata = Base.metadata
+except ImportError as e:
+    print(f"❌ 错误：无法加载 models 模块。请检查 models/__init__.py 是否正确导入了所有模型。")
+    print(f"详细错误：{e}")
+    sys.exit(1)
+
+# other values from the config, defined by the needs of env.py,
+# can be acquired:
+# my_important_option = config.get_main_option("my_important_option")
+# ... etc.
+
 
 def run_migrations_offline() -> None:
+    """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -34,22 +51,27 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
+
     with context.begin_transaction():
         context.run_migrations()
 
+
 def run_migrations_online() -> None:
+    """Run migrations in 'online' mode."""
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, 
-            target_metadata=target_metadata
+            connection=connection, target_metadata=target_metadata
         )
+
         with context.begin_transaction():
             context.run_migrations()
+
 
 if context.is_offline_mode():
     run_migrations_offline()

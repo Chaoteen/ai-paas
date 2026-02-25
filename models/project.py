@@ -1,16 +1,26 @@
 """
 项目与环境管理模块
 支持多环境、集成配置、资源隔离（ABAC 增强）
-生成时间：2026-02-20
+生成时间：2026-02-25 (Updated)
 """
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime
 from sqlalchemy import String, Boolean, ForeignKey, Integer, Text, UniqueConstraint, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import JSONB, ARRAY, TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY, TIMESTAMP, UUID as PG_UUID
 from .base import Base
 
+from uuid import UUID
+
+# 使用 TYPE_CHECKING 避免循环导入
+if TYPE_CHECKING:
+    from .prompt import PromptTemplate
+    from .organization import Organization
+    from .user import User
+    from .environment import Environment
+    from .conversation import Conversation
+    from .integration import Integration
 
 class ProjectVisibility(str, Enum):
     PRIVATE = "private"
@@ -62,7 +72,7 @@ class Project(Base):
         comment="项目配置"
     )
 
-    # ==================== ABAC 资源属性（新增）====================
+    # ==================== ABAC 资源属性 ====================
     sensitivity: Mapped[str] = mapped_column(
         String(20),
         default="internal",
@@ -92,7 +102,7 @@ class Project(Base):
         comment="数据保留天数（合规要求）"
     )
 
-    # 关系
+    # ==================== 关系定义 ====================
     organization: Mapped["Organization"] = relationship(
         "Organization",
         back_populates="projects"
@@ -102,13 +112,18 @@ class Project(Base):
         back_populates="project",
         cascade="all, delete-orphan"
     )
-# DISABLED: Agent is Org-level asset.     agents: Mapped[List["Agent"]] = relationship(
-# #         "Agent",
-# #         back_populates="project",
-# #         cascade="all, delete-orphan"
-# #     )
+    # Agent 是 Org 级别的资产，此处注释掉
+    # agents: Mapped[List["Agent"]] = relationship(...)
+    
     conversations: Mapped[List["Conversation"]] = relationship(
         "Conversation",
+        back_populates="project",
+        cascade="all, delete-orphan"
+    )
+
+    # [新增] 反向关系：关联 PromptTemplate
+    prompt_templates: Mapped[List["PromptTemplate"]] = relationship(
+        "PromptTemplate",
         back_populates="project",
         cascade="all, delete-orphan"
     )

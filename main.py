@@ -10,6 +10,8 @@ from models.database import engine, Base
 from api.v1 import api_v1_router
 from middleware.jwt_auth import JWTAuthMiddleware
 from api.v1 import agents
+# [新增] 导入 conversations 路由模块
+from api.v1 import conversations
 
 
 @asynccontextmanager
@@ -20,6 +22,7 @@ async def lifespan(app: FastAPI):
     print(f"📊 Debug mode: {settings.DEBUG}")
     
     # 创建数据库表
+    # 注意：在生产环境中通常使用 Alembic 迁移，这里仅用于开发快速启动
     Base.metadata.create_all(bind=engine)
     print("✅ Database tables created")
     
@@ -50,8 +53,15 @@ app.add_middleware(
 # app.add_middleware(JWTAuthMiddleware)
 
 # 包含 API 路由
+# 通用 V1 路由 (如果 api_v1_router 包含了子路由聚合，保留此行)
 app.include_router(api_v1_router)
+
+# Agents 模块路由
 app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
+
+# [新增] Conversations 模块路由
+# 注意：conversations.py 内部已经定义了 prefix="/conversations"，所以这里只需加 /api/v1
+app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
 
 
 # 健康检查端点

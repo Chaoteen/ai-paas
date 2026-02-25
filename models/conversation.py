@@ -1,16 +1,27 @@
 """
-会话与消息管理模块
-支持多轮对话、消息历史、反馈收集（ABAC 增强）
-生成时间：2026-02-20
+会话与消息管理模块 (Integrated with Prompt Engineering)
+支持多轮对话、消息历史、反馈收集（ABAC 增强）及 Prompt 模板版本控制
+生成时间：2026-02-25
 """
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, TYPE_CHECKING
 from datetime import datetime
-from sqlalchemy import String, Boolean, ForeignKey, Integer, Text, Index
+from sqlalchemy import String, Boolean, ForeignKey, Integer, Text, Index, DateTime
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import JSONB, ARRAY, TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY, UUID as PG_UUID
+from sqlalchemy.sql import func
+
 from .base import Base
 
+# 使用 TYPE_CHECKING 避免循环导入，仅在类型检查时引入 PromptTemplate
+if TYPE_CHECKING:
+    from .prompt import PromptTemplate
+    from .agent import Agent
+    from .project import Project
+    from .user import User
+
+
+from uuid import UUID
 
 class MessageRole(str, Enum):
     SYSTEM = "system"
@@ -27,8 +38,14 @@ class MessageStatus(str, Enum):
 
 
 class Conversation(Base):
-    """会话表 - 对话会话（ABAC 增强）"""
+    """会话表 - 对话会话（ABAC 增强 + Prompt 快照）"""
     __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(
+        String(36), 
+        primary_key=True, 
+        default=lambda: str(__import__('uuid').uuid4())
+    )
 
     project_id: Mapped[str] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"),
@@ -45,6 +62,16 @@ class Conversation(Base):
         nullable=True,
         index=True
     )
+    
+    # [新增] 关联 Prompt 模板快照
+    # 指向 models/prompt.py 中定义的 prompt_templates 表
+    prompt_template_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("prompt_templates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="创建会话时使用的 Prompt 模板 ID (快照)"
+    )
+
     title: Mapped[Optional[str]] = mapped_column(
         String(500),
         nullable=True,
@@ -66,7 +93,7 @@ class Conversation(Base):
         nullable=False
     )
 
-    # ==================== ABAC 资源属性（新增）====================
+    # ==================== ABAC 资源属性 ====================
     sensitivity: Mapped[str] = mapped_column(
         String(20),
         default="internal",
@@ -91,9 +118,19 @@ class Conversation(Base):
         comment="是否加密存储"
     )
 
-    # 关系
+    # ==================== 关系定义 ====================
+    # 注意：确保 models/prompt.py 中的 PromptTemplate 类添加了 back_populates="conversations"
+    prompt_template: Mapped[Optional["PromptTemplate"]] = relationship(
+        "PromptTemplate", 
+        back_populates="conversations"
+    )
+    
+    # 确保 models/project.py, models/agent.py, models/user.py 中也有对应的 back_populates
     project: Mapped["Project"] = relationship("Project", back_populates="conversations")
     agent: Mapped["Agent"] = relationship("Agent", back_populates="conversations")
+    # user 关系如果 User 模型中没有定义 conversations，可能会报错，若报错请移除 back_populates
+    user: Mapped[Optional["User"]] = relationship("User", foreign_keys=[user_id], viewonly=True) 
+    
     messages: Mapped[List["Message"]] = relationship(
         "Message",
         back_populates="conversation",
@@ -112,12 +149,19 @@ class Conversation(Base):
         Index('idx_conversation_status', 'status'),
         Index('idx_conversation_sensitivity', 'sensitivity'),
         Index('idx_conversation_owner', 'owner_id'),
+        Index('idx_conversation_prompt_template', 'prompt_template_id'),
     )
 
 
 class Message(Base):
     """消息表 - 对话消息"""
     __tablename__ = "messages"
+
+    id: Mapped[str] = mapped_column(
+        String(36), 
+        primary_key=True, 
+        default=lambda: str(__import__('uuid').uuid4())
+    )
 
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
@@ -167,6 +211,11 @@ class Message(Base):
         nullable=True,
         comment="错误信息"
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        nullable=False
+    )
 
     # 关系
     conversation: Mapped["Conversation"] = relationship("Conversation", back_populates="messages")
@@ -181,6 +230,12 @@ class Message(Base):
 class Feedback(Base):
     """反馈表 - 用户反馈收集"""
     __tablename__ = "feedbacks"
+
+    id: Mapped[str] = mapped_column(
+        String(36), 
+        primary_key=True, 
+        default=lambda: str(__import__('uuid').uuid4())
+    )
 
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
@@ -218,6 +273,11 @@ class Feedback(Base):
     review_notes: Mapped[Optional[str]] = mapped_column(
         Text,
         nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        nullable=False
     )
 
     # 关系
