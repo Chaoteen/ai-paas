@@ -59,8 +59,7 @@ async def generate_stream_response(
     db: Session
 ):
     """
-    生成 SSE 流式响应
-    模拟 LLM 流式输出 (实际项目中这里会调用 LLM SDK 的 stream 接口)
+    生成 SSE 流式响应 (接入真实 LLM)
     """
     try:
         # 1. 保存用户消息
@@ -82,19 +81,27 @@ async def generate_stream_response(
             yield {"event": "error", "data": f"Prompt 渲染失败：{str(e)}"}
             return
 
-        # 3. 模拟 LLM 流式生成 (TODO: 替换为真实的 LLM 调用)
+        # 3. 调用真实 LLM (流式)
+        from services.llm_service import llm_service
+        
         assistant_msg_id = str(uuid4())
         assistant_content = ""
         
         yield {"event": "start", "data": {"message_id": assistant_msg_id}}
 
-        # 模拟流式输出文本
-        response_text = f"[模拟回复] 收到你的消息：'{user_message_content}'。\n\n已渲染 Prompt 长度：{len(full_prompt)} 字符。\n(此处应接入真实 LLM)"
+        # 构建发送给 LLM 的消息列表
+        # 将渲染后的完整 Prompt 作为 System Message，用户当前输入作为 User Message
+        llm_messages = [
+            {"role": "system", "content": full_prompt},
+            {"role": "user", "content": user_message_content}
+        ]
         
-        for char in response_text:
-            assistant_content += char
-            yield {"event": "token", "data": char}
-            await asyncio.sleep(0.05) 
+        print(f"🚀 正在调用 {llm_service.provider} 模型 ({llm_service.model_name})...")
+        
+        # 流式获取回复
+        async for token in llm_service.chat_stream(llm_messages):
+            assistant_content += token
+            yield {"event": "token", "data": token}
 
         # 4. 保存助手消息
         assistant_msg = Message(
@@ -103,7 +110,11 @@ async def generate_stream_response(
             role="assistant",
             content=assistant_content,
             status="completed",
-            metadata={"prompt_length": len(full_prompt)}
+            metadata={
+                "prompt_length": len(full_prompt),
+                "provider": llm_service.provider,
+                "model": llm_service.model_name
+            }
         )
         db.add(assistant_msg)
         
@@ -123,6 +134,8 @@ async def generate_stream_response(
         yield {"event": "error", "data": f"服务器内部错误：{str(e)}"}
         if db:
             db.rollback()
+        import traceback
+        traceback.print_exc()
 
 # ================= API Endpoints =================
 

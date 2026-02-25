@@ -41,6 +41,15 @@ class Settings:
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(
         os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7")
     )
+    # ==================== AI 模型配置 ====================
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "ollama")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    OLLAMA_MODEL_NAME: str = os.getenv("OLLAMA_MODEL_NAME", "deepseek-r1:latest")
+    
+    CLOUD_API_KEY: str = os.getenv("CLOUD_API_KEY", "")
+    CLOUD_BASE_URL: str = os.getenv("CLOUD_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    CLOUD_MODEL_NAME: str = os.getenv("CLOUD_MODEL_NAME", "qwen-plus")
+
     
     # ==================== OPA 配置 ====================
     OPA_SERVER_URL: str = os.getenv(

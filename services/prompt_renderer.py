@@ -13,11 +13,19 @@ from models.conversation import Conversation, Message
 # 修正导入：User 在 auth.py 中
 from models.auth import User 
 
+class MockUser:
+    """模拟用户对象，用于测试或未登录场景"""
+    def __init__(self):
+        self.id = "guest-user-id"
+        self.username = "Guest User"
+        self.name = "Guest"  # 兼容 name 字段
+        self.email = "guest@example.com"
+
 class RenderContext:
     """渲染上下文数据类"""
     def __init__(
         self,
-        user: Optional[User] = None,
+        user: Optional[object] = None,  # 可以是 User 模型或 MockUser
         conversation_history: Optional[List[Dict[str, str]]] = None,
         current_time: Optional[datetime] = None,
         custom_variables: Optional[Dict[str, Any]] = None
@@ -65,7 +73,6 @@ class PromptRenderer:
     def get_active_template(self, project_id: str) -> Optional[PromptTemplate]:
         """
         获取指定项目下当前激活的最新模板
-        (原逻辑是按 agent_id，现调整为按 project_id，因为模板属于项目)
         """
         template = (
             self.db.query(PromptTemplate)
@@ -80,7 +87,7 @@ class PromptRenderer:
 
     def get_template_by_id(self, template_id: str) -> Optional[PromptTemplate]:
         """
-        通过 ID 获取特定版本的模板 (用于会话快照)
+        通过 ID 获取特定版本的模板
         """
         return (
             self.db.query(PromptTemplate)
@@ -133,7 +140,6 @@ class PromptRenderer:
             
         template = conversation.prompt_template
         
-        # 如果没有绑定模板，且未来需要支持从 Agent 获取，可在此扩展
         if not template:
             raise ValueError("未找到可用的提示词模板 (会话未绑定模板)")
 
@@ -146,9 +152,13 @@ class PromptRenderer:
             if msg.content
         ]
 
-        # 3. 构建上下文
+        # 3. 构建上下文 (关键修复：如果 user 为空，使用 MockUser)
+        current_user = conversation.user
+        if not current_user:
+            current_user = MockUser()
+
         ctx = RenderContext(
-            user=conversation.user,
+            user=current_user,
             conversation_history=history_data,
             custom_variables=custom_variables
         )
