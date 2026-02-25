@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from uuid import uuid4, UUID
 import asyncio
-
+import json  # 确保导入 json
 # 本地导入
 from models.database import get_db
 from models.conversation import Conversation, Message, MessageRole
@@ -60,6 +60,7 @@ async def generate_stream_response(
 ):
     """
     生成 SSE 流式响应 (接入真实 LLM)
+    [修复] 显式使用 json.dumps 序列化 data 字段，确保输出标准 JSON (双引号)
     """
     try:
         # 1. 保存用户消息
@@ -78,7 +79,8 @@ async def generate_stream_response(
         try:
             full_prompt = renderer.render_for_conversation(conversation_id)
         except ValueError as e:
-            yield {"event": "error", "data": f"Prompt 渲染失败：{str(e)}"}
+            # 错误信息也序列化为 JSON 字符串
+            yield {"event": "error", "data": json.dumps({"error": f"Prompt 渲染失败：{str(e)}"})}
             return
 
         # 3. 调用真实 LLM (流式)
@@ -87,10 +89,10 @@ async def generate_stream_response(
         assistant_msg_id = str(uuid4())
         assistant_content = ""
         
-        yield {"event": "start", "data": {"message_id": assistant_msg_id}}
+        # [修复] data 字段强制转为 JSON 字符串
+        yield {"event": "start", "data": json.dumps({"message_id": assistant_msg_id})}
 
         # 构建发送给 LLM 的消息列表
-        # 将渲染后的完整 Prompt 作为 System Message，用户当前输入作为 User Message
         llm_messages = [
             {"role": "system", "content": full_prompt},
             {"role": "user", "content": user_message_content}
@@ -101,7 +103,8 @@ async def generate_stream_response(
         # 流式获取回复
         async for token in llm_service.chat_stream(llm_messages):
             assistant_content += token
-            yield {"event": "token", "data": token}
+            # [修复] token 是字符串，json.dumps 会给它加上双引号，变成合法的 JSON 字符串
+            yield {"event": "token", "data": json.dumps(token)}
 
         # 4. 保存助手消息
         assistant_msg = Message(
@@ -128,10 +131,11 @@ async def generate_stream_response(
         
         db.commit()
         
-        yield {"event": "end", "data": {"message_id": assistant_msg_id, "content": assistant_content}}
+        # [修复] data 字段强制转为 JSON 字符串
+        yield {"event": "end", "data": json.dumps({"message_id": assistant_msg_id, "content": assistant_content})}
 
     except Exception as e:
-        yield {"event": "error", "data": f"服务器内部错误：{str(e)}"}
+        yield {"event": "error", "data": json.dumps({"error": f"服务器内部错误：{str(e)}"})}
         if db:
             db.rollback()
         import traceback
@@ -156,14 +160,14 @@ def create_conversation(
         if not template:
             raise HTTPException(status_code=404, detail="Prompt Template not found")
         # 确保模板属于该项目
-        if str(template.project_id) != str(payload.project_id):  # 修复 UUID vs str 比较问题
+        if str(template.project_id) != str(payload.project_id):
             raise HTTPException(status_code=400, detail="Template does not belong to this project")
 
     new_conv = Conversation(
         id=str(uuid4()),
         project_id=payload.project_id,
         agent_id=payload.agent_id,
-        user_id=None, # 当前硬编码为 None，未来从 Auth 获取
+        user_id=None,
         title=payload.title,
         status="active",
         prompt_template_id=payload.template_id
@@ -228,9 +232,7 @@ def preview_prompt(
 ):
     """
     在线调试 Prompt 模板
-    不使用数据库中的模板，直接渲染传入的字符串
     """
-    # 创建一个临时模板对象 (不保存)
     temp_template = PromptTemplate(
         id="temp",
         project_id="temp",
@@ -239,7 +241,6 @@ def preview_prompt(
         version=1
     )
     
-    # 构造一个 Mock 上下文
     class MockUser:
         id = "mock-id"
         username = "TestUser"
