@@ -12,6 +12,7 @@ from middleware.jwt_auth import JWTAuthMiddleware
 from api.v1 import agents
 # [新增] 导入 conversations 路由模块
 from api.v1 import conversations
+from api.v1 import flowise_bridge
 
 
 @asynccontextmanager
@@ -62,6 +63,7 @@ app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
 # [新增] Conversations 模块路由
 # 注意：conversations.py 内部已经定义了 prefix="/conversations"，所以这里只需加 /api/v1
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
+app.include_router(flowise_bridge.router, prefix="/api/v1")
 
 
 # 健康检查端点

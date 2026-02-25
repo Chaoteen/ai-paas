@@ -92,7 +92,8 @@ def db_session(test_engine) -> Generator[Session, None, None]:
 from models.base import Base
 from models.auth import User, Organization, OrganizationMember, APIKey
 from models.project import Project, Environment, Integration
-from models.agent import Agent, Tool, WorkflowNode, WorkflowEdge
+from models.agent import Agent  # 临时修复：Tool, WorkflowNode, WorkflowEdge 尚未实现
+from models.agent import Agent  # MVP 临时修复：Tool, WorkflowNode, WorkflowEdge 尚未实现
 from models.conversation import Conversation, Message, Feedback
 from models.abac import ABACPolicy, PolicyAssignment, PolicyEvaluationLog
 from models.audit import AuditLog, SystemSetting, FeatureFlag
