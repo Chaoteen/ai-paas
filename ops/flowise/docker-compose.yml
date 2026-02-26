@@ -1,0 +1,22 @@
+version: '3.8'
+services:
+  flowise:
+    image: flowiseai/flowise:latest
+    container_name: aios_flowise
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - AIOS_GATEWAY_URL=http://host.docker.internal:8000/api/v1/flowise/execute
+      - AIOS_GATEWAY_API_KEY=sk-test-flowise-integration-key
+    volumes:
+      - ~/.flowise:/root/.flowise
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - ai-net
+
+networks:
+  ai-net:
+    external: true # 或者让 docker 自动创建
