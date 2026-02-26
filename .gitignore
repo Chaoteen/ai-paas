@@ -60,3 +60,5 @@ __pycache__/
 
 # local dev junk
 run_ai_platform_v2.sh.bak.*
+*.pid
+*.broken
