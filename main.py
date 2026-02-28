@@ -10,8 +10,8 @@ from models.database import engine, Base
 from api.v1 import api_v1_router
 from middleware.jwt_auth import JWTAuthMiddleware
 from api.v1 import agents
-# [新增] 导入 conversations 路由模块
 from api.v1 import conversations
+# 【新增】导入 Flowise 桥接路由
 from api.v1 import flowise_bridge
 
 
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     print("👋 Shutting down...")
 
 
-# 创建 FastAPI 应用
+# 【关键】1. 先创建 FastAPI 应用实例
 app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
@@ -41,7 +41,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# 配置 CORS
+# 2. 配置 CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -50,19 +50,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 添加 JWT 认证中间件
+# 3. 添加 JWT 认证中间件 (当前已注释，按需开启)
 # app.add_middleware(JWTAuthMiddleware)
 
-# 包含 API 路由
+# 4. 注册路由 (必须在 app 实例创建之后)
+
 # 通用 V1 路由 (如果 api_v1_router 包含了子路由聚合，保留此行)
+# 注意：请确认 api_v1_router 内部是否已经定义了 prefix，避免路径重复
 app.include_router(api_v1_router)
 
 # Agents 模块路由
 app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
 
-# [新增] Conversations 模块路由
-# 注意：conversations.py 内部已经定义了 prefix="/conversations"，所以这里只需加 /api/v1
+# Conversations 模块路由
 app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
+
+# 【新增】Flowise 桥接路由
+# 路径将变为：/api/v1/flowise/execute
 app.include_router(flowise_bridge.router, prefix="/api/v1")
 
 

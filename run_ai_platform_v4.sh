@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_ai_platform_v4.sh: 全栈总控脚本 (模块化架构)
+# run_ai_platform_v4.sh: 全栈总控脚本 (模块化架构 - 已修复版)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +37,9 @@ case "${1:-start}" in
     "$SCRIPT_DIR/start_frontend.sh" start
     
     log_info "🎉 全栈启动完成!"
-    log_info "📊 运行 './run_ai_platform_v4.sh status' 查看状态"
+    log_info "📊 访问 Flowise: http://localhost:3000 (或您的 WSL IP)"
+    log_info "📚 API 文档: http://localhost:8000/docs"
+    log_info "💡 运行 './run_ai_platform_v4.sh status' 查看状态"
     ;;
     
   stop)
@@ -61,18 +63,32 @@ case "${1:-start}" in
     
   status)
     echo "=== 📊 AI PaaS V4 状态 ==="
+    
     echo "--- 基础设施 ---"
     if pgrep -f "ollama serve" > /dev/null; then echo "✅ Ollama"; else echo "❌ Ollama"; fi
-    docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "redis|opa" || echo "⚠️ Redis/OPA 未运行"
+    docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "redis|opa" || echo "⚠️ Redis/OPA 容器未运行"
     
     echo "--- 容器应用 ---"
+    # 检查关键容器
     docker ps --format "table {{.Names}}\t{{.Status}}" 2>/dev/null | grep -E "postgres|promptflow|flowise" || echo "⚠️ 应用容器未运行"
     
-    echo "--- 核心服务 ---"
-    if pgrep -f "run_bus.py" > /dev/null; then echo "✅ RedisBus"; else echo "❌ RedisBus"; fi
-    if pgrep -f "router_bridge.py" > /dev/null; then echo "✅ RouterBridge"; else echo "❌ RouterBridge"; fi
-    if pgrep -f "model_worker.py" > /dev/null; then echo "✅ ModelWorker"; else echo "❌ ModelWorker"; fi
-    if pgrep -f "start_agent_system.py" > /dev/null; then echo "✅ AgentSystem (Port 8000)"; else echo "❌ AgentSystem"; fi
+    echo "--- 核心服务 (Python) ---"
+    # 【关键修复】检测正确的进程名
+    if pgrep -f "uvicorn main:app" > /dev/null; then 
+      PID=$(pgrep -f "uvicorn main:app")
+      echo "✅ API Gateway (Port 8000) [PID: $PID]"
+    else 
+      echo "❌ API Gateway (Port 8000)"; 
+    fi
+    
+    if pgrep -f "start_agent_system.py" > /dev/null; then 
+      echo "✅ AgentSystem (Async Worker)"
+    else 
+      echo "❌ AgentSystem (Async Worker)"; 
+    fi
+    
+    # 可选：检查其他微服务如果存在
+    # if pgrep -f "run_bus.py" > /dev/null; then echo "✅ RedisBus"; else echo "❌ RedisBus"; fi
     ;;
     
   *)

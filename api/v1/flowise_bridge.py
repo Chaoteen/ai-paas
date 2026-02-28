@@ -37,7 +37,11 @@ class FlowiseResponse(BaseModel):
     history: Optional[List[Dict[str, str]]] = []
     sessionId: Optional[str] = None
 
-@router.post("/execute", response_model=FlowiseResponse)
+# ... (文件顶部的 import 保持不变) ...
+
+# 【修改点 1】移除 response_model=FlowiseResponse
+# 这样 FastAPI 会根据实际返回类型（str）自动处理响应
+@router.post("/execute")
 async def execute_prompt(
     request: FlowiseRequest,
     api_key: str = Depends(verify_api_key),
@@ -46,7 +50,7 @@ async def execute_prompt(
     """
     Flowise 专用接口：接收用户问题 -> 调用 PromptFlow -> 保存对话到 DB -> 返回结果
     """
-    print(f"[Flowise Bridge] 收到请求: {request.question[:50]}...")
+    print(f"[Flowise Bridge] 收到请求：{request.question[:50]}...")
     
     # 默认用户 ID (TODO: 未来从 JWT Token 中解析真实用户 ID)
     DEFAULT_USER_ID = "f92cc300-90cc-467c-a28e-60f2b87254bb" 
@@ -64,12 +68,10 @@ async def execute_prompt(
         conversation_id = str(uuid.uuid4())
         
         # 【关键数据准备】
-        # 注意：如果您的数据库 sensitivity 字段是 Enum 类型，请确保 "internal" 是合法值。
-        # 如果报错，尝试改为 "public" 或查看 models/conversation.py 中的定义。
         sensitivity_val = "internal"
         tags_val = [] 
         
-        # 动态检查 Conversation 模型是否有 owner_id 字段，防止 ArgumentError
+        # 动态检查 Conversation 模型是否有 owner_id 字段
         from sqlalchemy.inspection import inspect
         mapper = inspect(Conversation)
         has_owner_id = "owner_id" in [c.key for c in mapper.columns]
@@ -97,7 +99,6 @@ async def execute_prompt(
         new_conversation = Conversation(**conversation_kwargs)
         
         db.add(new_conversation)
-        # Flush 以确保对象获得持久的状态（虽然 ID 是生成的，但这有助于同步 ORM 状态）
         db.flush() 
 
         # 3. 调用 PromptFlow
@@ -160,13 +161,9 @@ async def execute_prompt(
         db.commit()
         print(f"[Flowise Bridge] ✅ 对话已成功保存至 DB: ConvID={conversation_id}")
 
-        # 8. 返回结果
-        return FlowiseResponse(
-            text=answer, 
-            question=request.question, 
-            history=request.history,
-            sessionId=conversation_id
-        )
+        # 【修改点 2】直接返回纯文本字符串 answer
+        # 这样 Flowise 就能直接拿到文本，不再报 "Missing value for input variable 'text'"
+        return answer
 
     except Exception as e:
         db.rollback()
