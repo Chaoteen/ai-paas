@@ -1,66 +1,92 @@
-# ai-os/data_plane/result.py
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
-@dataclass(frozen=True)
+@dataclass
 class ExecutionResult:
     """
-    Data Plane 统一返回结构（同步）
-    """
-    ok: bool
-    envelope_id: str
-    request_id: str
-    tenant_id: str
+    Data Plane 统一返回结果。
 
-    output: Optional[Any] = None
+    统一真相字段：
+    - ok
+    - output
+    - error
+    - metrics
+
+    为兼容旧代码，额外提供：
+    - success -> ok
+    - status -> "success" / "error"
+    """
+
+    ok: bool
+    output: Any = None
     error: Optional[str] = None
     metrics: Dict[str, Any] = field(default_factory=dict)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-    started_at: float = 0.0
-    finished_at: float = field(default_factory=lambda: time.time())
+    @property
+    def success(self) -> bool:
+        return self.ok
 
-    @staticmethod
-    def success(
-        *,
-        envelope_id: str,
-        request_id: str,
-        tenant_id: str,
-        output: Any,
+    @property
+    def status(self) -> str:
+        return "success" if self.ok else "error"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "success": self.success,
+            "status": self.status,
+            "output": self.output,
+            "error": self.error,
+            "metrics": self.metrics,
+            "metadata": self.metadata,
+        }
+
+    @classmethod
+    def from_exception(
+        cls,
+        exc: Exception,
         metrics: Optional[Dict[str, Any]] = None,
-        started_at: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> "ExecutionResult":
-        return ExecutionResult(
+        return cls(
+            ok=False,
+            output=None,
+            error=str(exc),
+            metrics=metrics or {},
+            metadata=metadata or {},
+        )
+
+    @classmethod
+    def success_result(
+        cls,
+        output: Any = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "ExecutionResult":
+        return cls(
             ok=True,
-            envelope_id=envelope_id,
-            request_id=request_id,
-            tenant_id=tenant_id,
             output=output,
             error=None,
             metrics=metrics or {},
-            started_at=started_at,
+            metadata=metadata or {},
         )
 
-    @staticmethod
-    def fail(
-        *,
-        envelope_id: str,
-        request_id: str,
-        tenant_id: str,
+    @classmethod
+    def error_result(
+        cls,
         error: str,
+        output: Any = None,
         metrics: Optional[Dict[str, Any]] = None,
-        started_at: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> "ExecutionResult":
-        return ExecutionResult(
+        return cls(
             ok=False,
-            envelope_id=envelope_id,
-            request_id=request_id,
-            tenant_id=tenant_id,
-            output=None,
+            output=output,
             error=error,
             metrics=metrics or {},
-            started_at=started_at,
+            metadata=metadata or {},
         )

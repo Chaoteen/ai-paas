@@ -1,7 +1,7 @@
-# ai-os/data_plane/router.py
 from __future__ import annotations
 
-import time
+import asyncio
+import logging
 from typing import Optional
 
 from data_plane.envelope import ExecutionEnvelope
@@ -10,48 +10,92 @@ from data_plane.handlers.agent_handler import AgentHandler
 from data_plane.handlers.model_handler import ModelHandler
 from data_plane.handlers.promptflow_handler import PromptflowHandler
 
+logger = logging.getLogger(__name__)
+
 
 class DataPlaneRouter:
     """
-    Data Plane Í¬²½Â·ÓÉÆ÷£¨×îÖÕ°æ£©
+    Data Plane Router
 
-    ÊäÈë£ºExecutionEnvelope£¨¶³½á£©
-    Êä³ö£ºExecutionResult£¨Í¬²½£©
-
-    ËµÃ÷£º
-    - ²»×öÊÚÈ¨ÅÐ¶Ï£¨Control Plane ÒÑ²Ã¾ö£©
-    - ²»ÐÞ¸Ä envelope£¨Ö»¶Á£©
-    - ¸ù¾Ý target_type ·Ö·¢µ½ handler
+    èŒè´£ï¼š
+    - æ ¹æ® envelope.target_type é€‰æ‹©å¯¹åº” handler
+    - ä¸å†åšæŽˆæƒåˆ¤æ–­ï¼ŒæŽˆæƒå·²åœ¨ Control Plane å®Œæˆ
+    - è¿”å›žç»Ÿä¸€çš„ ExecutionResult
     """
 
     def __init__(
         self,
         *,
-        agent_handler: AgentHandler,
-        model_handler: ModelHandler,
-        promptflow_handler: PromptflowHandler,
+        agent_handler: Optional[AgentHandler],
+        model_handler: Optional[ModelHandler],
+        promptflow_handler: Optional[PromptflowHandler],
     ):
         self.agent_handler = agent_handler
         self.model_handler = model_handler
         self.promptflow_handler = promptflow_handler
 
-    async def execute(self, envelope: ExecutionEnvelope) -> ExecutionResult:
-        started_at = time.time()
+    async def execute(
+        self,
+        envelope: ExecutionEnvelope,
+        timeout_s: float = 15.0,
+    ) -> ExecutionResult:
+        try:
+            if envelope.target_type == "agent":
+                handler = self.agent_handler
+            elif envelope.target_type == "model":
+                handler = self.model_handler
+            elif envelope.target_type == "promptflow":
+                handler = self.promptflow_handler
+            else:
+                return ExecutionResult.error_result(
+                    error=f"UNKNOWN_TARGET_TYPE: {envelope.target_type}",
+                    metadata={
+                        "router": "data_plane",
+                        "target_type": envelope.target_type,
+                    },
+                )
 
-        if envelope.target_type == "agent":
-            r = await self.agent_handler.handle(envelope)
-        elif envelope.target_type == "model":
-            r = await self.model_handler.handle(envelope)
-        elif envelope.target_type == "promptflow":
-            r = await self.promptflow_handler.handle(envelope)
-        else:
-            r = ExecutionResult.fail(
-                envelope_id=envelope.envelope_id,
-                request_id=envelope.request_id,
-                tenant_id=envelope.tenant_id,
-                error=f"UNKNOWN_TARGET_TYPE: {envelope.target_type}",
-                metrics={"router": "data_plane"},
-                started_at=started_at,
+            if handler is None:
+                return ExecutionResult.error_result(
+                    error=f"HANDLER_NOT_AVAILABLE: {envelope.target_type}",
+                    metadata={
+                        "router": "data_plane",
+                        "target_type": envelope.target_type,
+                    },
+                )
+
+            result = await asyncio.wait_for(
+                handler.handle(envelope),
+                timeout=timeout_s,
             )
 
-        return r
+            if isinstance(result, ExecutionResult):
+                return result
+
+            if isinstance(result, dict):
+                ok = bool(
+                    result.get("ok")
+                    if "ok" in result
+                    else result.get("success", result.get("status") == "success")
+                )
+                return ExecutionResult(
+                    ok=ok,
+                    output=result.get("output"),
+                    error=result.get("error"),
+                    metrics=result.get("metrics", {}) or {},
+                    metadata=result.get("metadata", {}) or {},
+                )
+
+            return ExecutionResult.success_result(output=result)
+
+        except asyncio.TimeoutError:
+            return ExecutionResult.error_result(
+                error="EXECUTION_TIMEOUT",
+                metadata={"router": "data_plane"},
+            )
+        except Exception as e:
+            logger.exception("DataPlaneRouter execution failed")
+            return ExecutionResult.error_result(
+                error=str(e),
+                metadata={"router": "data_plane"},
+            )

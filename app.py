@@ -1,10 +1,13 @@
-from agent_core.core import AgentCore
-from myproject.bus import MessageBus  # 假设你的总线模块在这里
-from myproject.models import QwenInterface  # 你封装的Qwen模型调用接口
+from __future__ import annotations
 
-bus = create_message_bus(use_redis=True)
-qwen = QwenInterface()  # 你现有的模型接口
-agent = AgentCore(bus, qwen, name="LocalAgent")
+from aiohttp import web
 
-print("✅ AgentCore 启动完成，可通过 MessageBus 发送任务:")
-print("   bus.publish('agent.task', {'task_id': 1, 'content': '帮我总结今天的对话'})")
+from control_plane.prompt_execution_gateway import create_app
+
+
+def main():
+    web.run_app(create_app(), host="0.0.0.0", port=8080)
+
+
+if __name__ == "__main__":
+    main()

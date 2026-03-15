@@ -1,19 +1,8 @@
-# ai-os/control_plane/prompt_execution_gateway.py
 #!/usr/bin/env python3
-"""
-Control Plane - Prompt Execution Gateway (Frozen)
-- 构造冻结 ExecutionContext
-- 调用 PolicyClient / PDP 得到冻结 PolicyDecision
-- 将裁剪后的 envelope 委派给 Data Plane Router 执行
-- 同步返回执行结果
-
-说明：
-- 该文件属于 Control Plane，建议放在 ai-os/control_plane/
-"""
-
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import uuid
 from datetime import datetime
@@ -22,34 +11,19 @@ from typing import Any, Dict, Optional
 from aiohttp import web
 from redis import asyncio as aioredis
 
-# ======== Frozen Models (Control Plane) ========
 from control_plane.context import ExecutionContext
 from control_plane.decision import PolicyDecision
-
-# ======== Policy Client (Control Plane) ========
-# 你已确认 policy_engine.py 对应 control_plane/policy_client.py
 from control_plane.policy_client import PolicyClient
 
-# ======== Data Plane ========
 from data_plane.envelope import ExecutionEnvelope
 from data_plane.router import DataPlaneRouter
-from data_plane.adapters.redis_stream_adapter import RedisStreamAdapter
-from data_plane.handlers.agent_handler import AgentHandler
-from data_plane.handlers.model_handler import ModelHandler
-from data_plane.handlers.promptflow_handler import PromptflowHandler
+from data_plane.result import ExecutionResult
 
-# =========================
-# 基础配置
-# =========================
 
 CONFIG = {
     "http_host": "0.0.0.0",
     "http_port": 8080,
-
-    # Redis
     "redis_url": "redis://localhost:6379",
-
-    # 同步等待结果超时（秒）
     "default_timeout_s": 15.0,
 }
 
@@ -61,138 +35,102 @@ logger = logging.getLogger("ControlPlaneGateway")
 
 
 class PromptExecutionGateway:
-    """
-    冻结的 Control Plane 网关
-    """
-
     def __init__(self):
         self.redis: Optional[aioredis.Redis] = None
-
-        # Control Plane: policy
         self.policy_client: Optional[PolicyClient] = None
-
-        # Data Plane Router
         self.data_plane: Optional[DataPlaneRouter] = None
+        self.redis_adapter: Optional[Any] = None
 
-        # Data Plane Redis Adapter
-        self.redis_adapter: Optional[RedisStreamAdapter] = None
-
-    # ---------- lifecycle ----------
+    def _import_runtime_class(self, module_name: str, class_name: str):
+        """
+        延迟导入运行时依赖，避免 app import 阶段就因为可选模块缺失而崩溃。
+        """
+        try:
+            module = importlib.import_module(module_name)
+            return getattr(module, class_name)
+        except ModuleNotFoundError as e:
+            raise RuntimeError(
+                f"RUNTIME_DEPENDENCY_MISSING: module={module_name}, class={class_name}, detail={e}"
+            ) from e
+        except AttributeError as e:
+            raise RuntimeError(
+                f"RUNTIME_CLASS_MISSING: module={module_name}, class={class_name}, detail={e}"
+            ) from e
 
     async def init_connections(self):
-        # Redis（Control Plane 自己的治理/计量/配额也可能用）
         self.redis = await aioredis.from_url(CONFIG["redis_url"], decode_responses=True)
-
-        # Policy client（PDP/PEP 客户端）
         self.policy_client = PolicyClient(redis=self.redis)
 
-        # Data Plane 适配层（复用 Redis streams）
+        RedisStreamAdapter = self._import_runtime_class(
+            "data_plane.adapters.redis_stream_adapter",
+            "RedisStreamAdapter",
+        )
+        AgentHandler = self._import_runtime_class(
+            "data_plane.handlers.agent_handler",
+            "AgentHandler",
+        )
+        ModelHandler = self._import_runtime_class(
+            "data_plane.handlers.model_handler",
+            "ModelHandler",
+        )
+        PromptflowHandler = self._import_runtime_class(
+            "data_plane.handlers.promptflow_handler",
+            "PromptflowHandler",
+        )
+
         self.redis_adapter = RedisStreamAdapter(
             redis_url=CONFIG["redis_url"],
-            # 这里和你现有链路对齐：
-            # - 发布到 agent.tasks.stream（router_bridge 消费）
             tasks_stream="agent.tasks.stream",
-            # - 等待 agent.result.stream（task_manager/model_service 发布）
             results_stream="agent.result.stream",
             consumer_group="control_plane_gateway",
         )
         await self.redis_adapter.start()
 
-        # Data Plane handlers
         agent_handler = AgentHandler(self.redis_adapter)
         model_handler = ModelHandler(self.redis_adapter)
         promptflow_handler = PromptflowHandler(self.redis_adapter)
 
-        # Data Plane router
         self.data_plane = DataPlaneRouter(
             agent_handler=agent_handler,
             model_handler=model_handler,
             promptflow_handler=promptflow_handler,
         )
-
         logger.info("Control Plane connections initialized")
 
     async def close_connections(self):
         try:
-            if self.redis_adapter:
+            if self.redis_adapter and hasattr(self.redis_adapter, "stop"):
                 await self.redis_adapter.stop()
         finally:
             if self.redis:
                 await self.redis.close()
 
-    # ---------- Frozen Context Build ----------
-
     def build_execution_context(self, request_data: Dict[str, Any]) -> ExecutionContext:
-        request_id = f"req_{uuid.uuid4().hex}"
-
-        subject = {
-            "type": request_data.get("subject_type", "user"),
-            "id": request_data.get("user_id"),
-            "tenant_id": request_data.get("tenant_id"),
-            "attributes": request_data.get("user_attributes", {}),
-        }
-
-        action = request_data.get("action", "prompt.execute")
-
-        resource = {
-            "type": "prompt",
-            "id": request_data.get("resource_id", "default"),
-            "attributes": request_data.get("resource_attributes", {}),
-        }
-
-        environment = {
-            "region": request_data.get("region", "default"),
-            "compliance": request_data.get("compliance", []),
-            "timestamp": datetime.utcnow().isoformat(),
-            "source": request_data.get("request_source", "unknown"),
-        }
-
-        input_payload = request_data.get("input", {})
-
-        return ExecutionContext(
-            request_id=request_id,
-            subject=subject,
-            action=action,
-            resource=resource,
-            environment=environment,
-            input_payload=input_payload,
-        )
-
-    # ---------- Quota / Usage ----------
+        return ExecutionContext.from_request_data(request_data)
 
     async def check_quota(self, tenant_id: str) -> bool:
-        # 预留：可扩展为 tenant daily limits / tokens limits
         return True
 
     async def record_usage(self, tenant_id: str, tokens: int):
-        # 用 Redis 做简单计量：usage:{tenant}:{yyyymmdd}
+        if not self.redis:
+            return
         key = f"usage:{tenant_id}:{datetime.utcnow().strftime('%Y%m%d')}"
         await self.redis.hincrby(key, "requests", 1)
         await self.redis.hincrby(key, "tokens", int(tokens or 0))
 
-    # ---------- Delegate to Data Plane ----------
-
     def _select_target(self, ctx: ExecutionContext, decision: PolicyDecision) -> Dict[str, str]:
-        """
-        决定 Data Plane 执行目标：
-        - 优先采用 input.target_type / input.target（调用者显式指定）
-        - 否则使用 policy.capabilities.allowed_agents 的第一个
-        """
         inp = ctx.input or {}
         target_type = inp.get("target_type") or "agent"
 
-        # target 选择规则：
-        # - model: 默认用 policy.allowed_models[0]，否则用 input.target
-        # - agent: 默认用 policy.allowed_agents[0]
-        # - promptflow: 默认用 input.target（比如 flow_id），没有就走 "pf.default"
-        policy_caps = (decision.capabilities or {})
+        policy_caps = decision.capabilities or {}
         allowed_agents = policy_caps.get("allowed_agents") or ["agent.default"]
         allowed_models = policy_caps.get("allowed_models") or ["deepseek-r1-14b"]
+        allowed_promptflows = policy_caps.get("allowed_promptflows") or ["pf.default"]
 
         if target_type == "model":
             target = inp.get("target") or allowed_models[0]
         elif target_type == "promptflow":
-            target = inp.get("target") or "pf.default"
+            target = inp.get("target") or allowed_promptflows[0]
         else:
             target_type = "agent"
             target = inp.get("target") or allowed_agents[0]
@@ -206,9 +144,6 @@ class PromptExecutionGateway:
         target_type: str,
         target: str,
     ) -> ExecutionEnvelope:
-        """
-        Control Plane -> Data Plane 的裁剪封装（冻结边界）
-        """
         envelope_id = f"env_{uuid.uuid4().hex}"
 
         return ExecutionEnvelope(
@@ -221,57 +156,71 @@ class PromptExecutionGateway:
             environment=ctx.environment,
             target_type=target_type,
             target=target,
-            payload=ctx.input,  # Data Plane 只用 input，不拿全 ctx
+            payload=ctx.input,
             context={
-                # 只透传 policy 决策结果（冻结）
                 "policy": decision.to_dict(),
-                # 可选：会话配置（冻结）
                 "session_context": ctx.input.get("session_context", {}),
-                # 可选：agent_profile（冻结）
                 "agent_profile": ctx.input.get("agent_profile", {}),
+                "trace_id": ctx.trace_id,
+                "session_id": ctx.session_id,
             },
             created_at=datetime.utcnow().timestamp(),
         )
 
+    @staticmethod
+    def _normalize_result(result: Any) -> ExecutionResult:
+        if isinstance(result, ExecutionResult):
+            return result
+
+        if isinstance(result, dict):
+            ok = bool(
+                result.get("ok")
+                if "ok" in result
+                else result.get("success", result.get("status") == "success")
+            )
+            return ExecutionResult(
+                ok=ok,
+                output=result.get("output"),
+                error=result.get("error"),
+                metrics=result.get("metrics", {}) or {},
+                metadata=result.get("metadata", {}) or {},
+            )
+
+        return ExecutionResult.error_result(
+            error=f"UNSUPPORTED_RESULT_TYPE: {type(result).__name__}"
+        )
+
     async def delegate_execution(self, ctx: ExecutionContext, decision: PolicyDecision) -> Dict[str, Any]:
         if not self.data_plane:
-            raise RuntimeError("DataPlaneRouter not initialized")
+            raise RuntimeError("DATA_PLANE_NOT_INITIALIZED")
 
         target_sel = self._select_target(ctx, decision)
         target_type = target_sel["target_type"]
         target = target_sel["target"]
 
         env = self._build_execution_envelope(ctx, decision, target_type, target)
-
         timeout_s = float((ctx.input or {}).get("timeout_s") or CONFIG["default_timeout_s"])
 
-        result = await self.data_plane.execute(env, timeout_s=timeout_s)
+        raw_result = await self.data_plane.execute(env, timeout_s=timeout_s)
+        result = self._normalize_result(raw_result)
 
         return {
             "envelope_id": env.envelope_id,
             "target_type": target_type,
             "target": target,
-            "status": result.status,
-            "output": result.output,
-            "error": result.error,
-            "metrics": result.metrics,
+            **result.to_dict(),
         }
-
-    # ---------- HTTP Handlers ----------
 
     async def execute(self, request: web.Request) -> web.Response:
         start_time = datetime.utcnow()
-
         try:
             if not self.policy_client:
-                raise RuntimeError("PolicyClient not initialized")
+                raise RuntimeError("POLICY_CLIENT_NOT_INITIALIZED")
 
             request_data = await request.json()
             ctx = self.build_execution_context(request_data)
 
-            # 1) Authorize (PEP -> PDP)
             decision = await self.policy_client.authorize(ctx)
-
             if not decision.allow:
                 return web.json_response(
                     {
@@ -292,14 +241,11 @@ class PromptExecutionGateway:
                     status=400,
                 )
 
-            # 2) Quota
             if not await self.check_quota(tenant_id):
                 return web.json_response({"error": "QUOTA_EXCEEDED"}, status=429)
 
-            # 3) Delegate to Data Plane (sync-wait)
             dp_result = await self.delegate_execution(ctx, decision)
 
-            # 4) Usage record（如果 output 里有 tokens）
             tokens_used = 0
             try:
                 out = dp_result.get("output") or {}
@@ -353,7 +299,6 @@ def create_app():
 
     app.on_startup.append(_startup)
     app.on_cleanup.append(_cleanup)
-
     return app
 
 
