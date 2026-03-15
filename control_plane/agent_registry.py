@@ -1,43 +1,48 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from control_plane.agent_admission import AgentAdmission, AdmissionDecision
 from control_plane.agent_manifest import AgentManifest, AgentRecord
 from control_plane.control_bus import ControlBus
 from control_plane.control_events import ControlEvent
+from control_plane.repositories.agent_repository import (
+    AgentRepository,
+    InMemoryAgentRepository,
+)
 
 
 class AgentRegistry:
     """
-    第三轮版本：
-    - 内存注册中心
-    - 控制事件发布
+    第四轮版本：
+    - AgentRegistry 不再直接持有 dict
+    - 改为依赖 AgentRepository
+    - 继续发布 control events
     """
 
     def __init__(
         self,
         admission: Optional[AgentAdmission] = None,
         control_bus: Optional[ControlBus] = None,
+        agent_repository: Optional[AgentRepository] = None,
     ):
-        self._records: Dict[str, AgentRecord] = {}
-        self._name_index: Dict[str, str] = {}
         self.admission = admission or AgentAdmission()
         self.control_bus = control_bus or ControlBus()
+        self.agent_repository = agent_repository or InMemoryAgentRepository()
 
     def register(self, manifest: AgentManifest) -> AgentRecord:
         decision: AdmissionDecision = self.admission.evaluate(manifest)
         if not decision.allow:
             raise ValueError(decision.reason or "AGENT_ADMISSION_DENIED")
 
-        existing_id = self._name_index.get(manifest.name)
-        if existing_id and existing_id in self._records:
-            record = self._records[existing_id]
-            previous_status = record.status
+        existing = self.agent_repository.get_by_name(manifest.name)
+        if existing:
+            previous_status = existing.status
 
-            record.manifest = manifest
-            record.status = "online"
-            record.touch()
+            existing.manifest = manifest
+            existing.status = "online"
+            existing.touch()
+            record = self.agent_repository.save(existing)
 
             self.control_bus.publish(
                 ControlEvent.new(
@@ -53,9 +58,7 @@ class AgentRegistry:
                         "capabilities": list(record.manifest.capabilities),
                         "supported_models": list(record.manifest.supported_models),
                     },
-                    metadata={
-                        "mode": "update",
-                    },
+                    metadata={"mode": "update"},
                 )
             )
 
@@ -77,8 +80,7 @@ class AgentRegistry:
 
         record = AgentRecord.new(manifest)
         record.touch()
-        self._records[record.agent_id] = record
-        self._name_index[manifest.name] = record.agent_id
+        record = self.agent_repository.save(record)
 
         self.control_bus.publish(
             ControlEvent.new(
@@ -94,9 +96,7 @@ class AgentRegistry:
                     "capabilities": list(record.manifest.capabilities),
                     "supported_models": list(record.manifest.supported_models),
                 },
-                metadata={
-                    "mode": "create",
-                },
+                metadata={"mode": "create"},
             )
         )
 
@@ -116,13 +116,14 @@ class AgentRegistry:
         return record
 
     def heartbeat(self, agent_id: str) -> AgentRecord:
-        record = self._records.get(agent_id)
+        record = self.agent_repository.get(agent_id)
         if not record:
             raise KeyError(f"AGENT_NOT_FOUND: {agent_id}")
 
         previous_status = record.status
         record.status = "online"
         record.touch()
+        record = self.agent_repository.save(record)
 
         self.control_bus.publish(
             ControlEvent.new(
@@ -155,13 +156,10 @@ class AgentRegistry:
         return record
 
     def list_agents(self) -> List[AgentRecord]:
-        return sorted(
-            self._records.values(),
-            key=lambda r: (r.manifest.name, r.created_at),
-        )
+        return self.agent_repository.list_all()
 
     def get_agent(self, agent_id: str) -> Optional[AgentRecord]:
-        return self._records.get(agent_id)
+        return self.agent_repository.get(agent_id)
 
     def list_control_events(
         self,

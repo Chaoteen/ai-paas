@@ -16,6 +16,11 @@ from control_plane.decision import PolicyDecision
 from control_plane.policy_client import PolicyClient
 from control_plane.agent_manifest import AgentManifest
 from control_plane.agent_registry import AgentRegistry
+from control_plane.control_bus import ControlBus
+from control_plane.repositories.agent_repository import InMemoryAgentRepository
+from control_plane.repositories.control_event_repository import (
+    InMemoryControlEventRepository,
+)
 
 from data_plane.envelope import ExecutionEnvelope
 from data_plane.router import DataPlaneRouter
@@ -42,7 +47,15 @@ class PromptExecutionGateway:
         self.policy_client: Optional[PolicyClient] = None
         self.data_plane: Optional[DataPlaneRouter] = None
         self.redis_adapter: Optional[Any] = None
-        self.agent_registry = AgentRegistry()
+
+        event_repository = InMemoryControlEventRepository()
+        control_bus = ControlBus(event_repository=event_repository)
+        agent_repository = InMemoryAgentRepository()
+
+        self.agent_registry = AgentRegistry(
+            control_bus=control_bus,
+            agent_repository=agent_repository,
+        )
 
     def _import_runtime_class(self, module_name: str, class_name: str):
         try:
@@ -384,12 +397,10 @@ def create_app():
     app = web.Application()
 
     app.router.add_post("/v1/execute", gateway.execute)
-
     app.router.add_post("/v1/agents/register", gateway.register_agent)
     app.router.add_post("/v1/agents/heartbeat", gateway.heartbeat_agent)
     app.router.add_get("/v1/agents", gateway.list_agents)
     app.router.add_get("/v1/control/events", gateway.list_control_events)
-
     app.router.add_get("/health", gateway.health)
 
     async def _startup(app_: web.Application):
