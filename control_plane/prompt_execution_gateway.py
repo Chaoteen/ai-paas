@@ -14,6 +14,8 @@ from redis import asyncio as aioredis
 from control_plane.context import ExecutionContext
 from control_plane.decision import PolicyDecision
 from control_plane.policy_client import PolicyClient
+from control_plane.agent_manifest import AgentManifest
+from control_plane.agent_registry import AgentRegistry
 
 from data_plane.envelope import ExecutionEnvelope
 from data_plane.router import DataPlaneRouter
@@ -40,11 +42,9 @@ class PromptExecutionGateway:
         self.policy_client: Optional[PolicyClient] = None
         self.data_plane: Optional[DataPlaneRouter] = None
         self.redis_adapter: Optional[Any] = None
+        self.agent_registry = AgentRegistry()
 
     def _import_runtime_class(self, module_name: str, class_name: str):
-        """
-        延迟导入运行时依赖，避免 app import 阶段就因为可选模块缺失而崩溃。
-        """
         try:
             module = importlib.import_module(module_name)
             return getattr(module, class_name)
@@ -274,6 +274,82 @@ class PromptExecutionGateway:
                 status=500,
             )
 
+    async def register_agent(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            manifest = AgentManifest.from_dict(payload)
+            record = self.agent_registry.register(manifest)
+
+            return web.json_response(
+                {
+                    "ok": True,
+                    "agent": record.to_dict(),
+                },
+                status=201,
+            )
+        except ValueError as e:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": str(e),
+                },
+                status=400,
+            )
+        except Exception as e:
+            logger.exception("Agent registration failed")
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": str(e),
+                },
+                status=500,
+            )
+
+    async def heartbeat_agent(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+            agent_id = (payload.get("agent_id") or "").strip()
+            if not agent_id:
+                return web.json_response(
+                    {"ok": False, "error": "AGENT_ID_REQUIRED"},
+                    status=400,
+                )
+
+            record = self.agent_registry.heartbeat(agent_id)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "agent": record.to_dict(),
+                }
+            )
+        except KeyError as e:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": str(e),
+                },
+                status=404,
+            )
+        except Exception as e:
+            logger.exception("Agent heartbeat failed")
+            return web.json_response(
+                {
+                    "ok": False,
+                    "error": str(e),
+                },
+                status=500,
+            )
+
+    async def list_agents(self, request: web.Request) -> web.Response:
+        records = [r.to_dict() for r in self.agent_registry.list_agents()]
+        return web.json_response(
+            {
+                "ok": True,
+                "agents": records,
+                "count": len(records),
+            }
+        )
+
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {
@@ -289,6 +365,11 @@ def create_app():
     app = web.Application()
 
     app.router.add_post("/v1/execute", gateway.execute)
+
+    app.router.add_post("/v1/agents/register", gateway.register_agent)
+    app.router.add_post("/v1/agents/heartbeat", gateway.heartbeat_agent)
+    app.router.add_get("/v1/agents", gateway.list_agents)
+
     app.router.add_get("/health", gateway.health)
 
     async def _startup(app_: web.Application):
