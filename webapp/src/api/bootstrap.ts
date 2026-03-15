@@ -31,7 +31,7 @@ export async function fetchBootstrap(): Promise<Bootstrap> {
   }
 
   // ✅ 走相对路径，让 Vite proxy / 未来 Nginx 反代接管
-  const r = await fetch("/api/ui/bootstrap", {
+  const r = await fetch("/api/v1/ui/bootstrap", {
     method: "GET",
     headers: {
       Authorization: `Bearer ${token}`,
