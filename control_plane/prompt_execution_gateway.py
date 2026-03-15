@@ -350,6 +350,25 @@ class PromptExecutionGateway:
             }
         )
 
+    async def list_control_events(self, request: web.Request) -> web.Response:
+        event_type = request.query.get("event_type")
+        aggregate_id = request.query.get("aggregate_id")
+
+        events = [
+            e.to_dict()
+            for e in self.agent_registry.list_control_events(
+                event_type=event_type,
+                aggregate_id=aggregate_id,
+            )
+        ]
+        return web.json_response(
+            {
+                "ok": True,
+                "events": events,
+                "count": len(events),
+            }
+        )
+
     async def health(self, request: web.Request) -> web.Response:
         return web.json_response(
             {
@@ -369,6 +388,7 @@ def create_app():
     app.router.add_post("/v1/agents/register", gateway.register_agent)
     app.router.add_post("/v1/agents/heartbeat", gateway.heartbeat_agent)
     app.router.add_get("/v1/agents", gateway.list_agents)
+    app.router.add_get("/v1/control/events", gateway.list_control_events)
 
     app.router.add_get("/health", gateway.health)
 
