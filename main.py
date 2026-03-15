@@ -1,101 +1,128 @@
-"""
-AI-PaaS 平台主应用入口
-"""
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
 
-from config.settings import settings
-from models.database import engine, Base
-from api.v1 import api_v1_router
-from middleware.jwt_auth import JWTAuthMiddleware
-from api.v1 import agents
-from api.v1 import conversations
-# 【新增】导入 Flowise 桥接路由
-from api.v1 import flowise_bridge
+from fastapi import FastAPI
+
+from bootstrap.runtime_bootstrap import build_runtime_state
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    # 启动时
-    print(f"🚀 Starting {settings.APP_NAME} v{settings.APP_VERSION}")
-    print(f"📊 Debug mode: {settings.DEBUG}")
-    
-    # 创建数据库表
-    # 注意：在生产环境中通常使用 Alembic 迁移，这里仅用于开发快速启动
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database tables created")
-    
+    runtime_state = await build_runtime_state()
+
+    app.state.runtime_mode = runtime_state["mode"]
+    app.state.db = runtime_state["db"]
+    app.state.agent_registry = runtime_state["agent_registry"]
+    app.state.control_bus = runtime_state["control_bus"]
+    app.state.data_bus = runtime_state["data_bus"]
+
     yield
-    
-    # 关闭时
-    print("👋 Shutting down...")
+
+    db = runtime_state.get("db")
+    if db is not None:
+        await db.dispose()
 
 
-# 【关键】1. 先创建 FastAPI 应用实例
 app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    description="AI 开发者 PaaS 平台 - 提供 Agent 编排、工作流管理、权限控制等功能",
-    lifespan=lifespan
+    title="AI-PaaS Runtime",
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
-# 2. 配置 CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
-# 3. 添加 JWT 认证中间件 (当前已注释，按需开启)
-# app.add_middleware(JWTAuthMiddleware)
-
-# 4. 注册路由 (必须在 app 实例创建之后)
-
-# 通用 V1 路由 (如果 api_v1_router 包含了子路由聚合，保留此行)
-# 注意：请确认 api_v1_router 内部是否已经定义了 prefix，避免路径重复
-app.include_router(api_v1_router)
-
-# Agents 模块路由
-app.include_router(agents.router, prefix="/api/v1/agents", tags=["agents"])
-
-# Conversations 模块路由
-app.include_router(conversations.router, prefix="/api/v1/conversations", tags=["conversations"])
-
-# 【新增】Flowise 桥接路由
-# 路径将变为：/api/v1/flowise/execute
-app.include_router(flowise_bridge.router, prefix="/api/v1")
-
-
-# 健康检查端点
 @app.get("/health")
-async def health_check():
-    """健康检查"""
+async def health():
     return {
-        "status": "healthy",
-        "version": settings.APP_VERSION
+        "status": "ok",
+        "runtime_mode": app.state.runtime_mode,
     }
 
 
-# 根路径
-@app.get("/")
-async def root():
-    """根路径"""
+@app.get("/runtime/info")
+async def runtime_info():
     return {
-        "message": f"Welcome to {settings.APP_NAME}",
-        "docs": "/docs",
-        "health": "/health"
+        "runtime_mode": app.state.runtime_mode,
+        "persistence": "postgres" if app.state.runtime_mode == "postgres" else "memory",
     }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=settings.DEBUG
+@app.post("/runtime/agents/register")
+async def register_agent(payload: dict):
+    agent = await app.state.agent_registry.register_agent(payload)
+    return {
+        "ok": True,
+        "agent": agent,
+    }
+
+
+@app.post("/runtime/agents/{agent_id}/heartbeat")
+async def heartbeat_agent(agent_id: str):
+    ok = await app.state.agent_registry.heartbeat(agent_id)
+    return {
+        "ok": ok,
+        "agent_id": agent_id,
+    }
+
+
+@app.get("/runtime/agents")
+async def list_agents(tenant_id: str | None = None):
+    agents = await app.state.agent_registry.list_agents(tenant_id=tenant_id)
+    return {
+        "ok": True,
+        "items": agents,
+        "count": len(agents),
+    }
+
+
+@app.get("/runtime/control-events")
+async def list_control_events(
+    event_type: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 100,
+):
+    events = await app.state.control_bus.list_events(
+        event_type=event_type,
+        agent_id=agent_id,
+        limit=limit,
     )
+    return {
+        "ok": True,
+        "items": events,
+        "count": len(events),
+    }
+
+
+@app.post("/runtime/data-events/publish")
+async def publish_data_event(payload: dict):
+    event = await app.state.data_bus.publish(
+        event_type=payload["event_type"],
+        task_id=payload.get("task_id"),
+        execution_id=payload.get("execution_id"),
+        tenant_id=payload.get("tenant_id"),
+        payload=payload.get("payload", {}),
+    )
+    return {
+        "ok": True,
+        "event": event,
+    }
+
+
+@app.get("/runtime/data-events")
+async def list_data_events(
+    event_type: str | None = None,
+    task_id: str | None = None,
+    execution_id: str | None = None,
+    limit: int = 100,
+):
+    events = await app.state.data_bus.list_events(
+        event_type=event_type,
+        task_id=task_id,
+        execution_id=execution_id,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "items": events,
+        "count": len(events),
+    }

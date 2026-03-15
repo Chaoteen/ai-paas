@@ -1,173 +1,157 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlparse
 
-from control_plane.agent_admission import AgentAdmission, AdmissionDecision
-from control_plane.agent_manifest import AgentManifest, AgentRecord
-from control_plane.control_bus import ControlBus
-from control_plane.control_events import ControlEvent
-from control_plane.repositories.agent_repository import (
-    AgentRepository,
-    InMemoryAgentRepository,
-)
+
+class InMemoryAgentRepository:
+    """
+    默认内存版 Agent 仓库
+    """
+
+    def __init__(self):
+        self._agents: dict[str, dict[str, Any]] = {}
+
+    async def save(self, agent: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+
+        existing = self._agents.get(agent["id"])
+        if existing:
+            existing.update(agent)
+            existing["updated_at"] = now
+            self._agents[agent["id"]] = existing
+            return existing
+
+        record = {
+            **agent,
+            "created_at": agent.get("created_at", now),
+            "updated_at": now,
+        }
+        self._agents[agent["id"]] = record
+        return record
+
+    async def get(self, agent_id: str) -> dict[str, Any] | None:
+        return self._agents.get(agent_id)
+
+    async def list(self, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        agents = list(self._agents.values())
+        if tenant_id:
+            agents = [a for a in agents if a.get("tenant_id") == tenant_id]
+        return agents
+
+    async def update_status(self, agent_id: str, status: str) -> bool:
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return False
+        agent["status"] = status
+        agent["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    async def touch_heartbeat(self, agent_id: str, at: datetime | None = None) -> bool:
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return False
+        agent["heartbeat_at"] = at or datetime.now(timezone.utc)
+        agent["updated_at"] = datetime.now(timezone.utc)
+        return True
+
+    async def delete(self, agent_id: str) -> bool:
+        return self._agents.pop(agent_id, None) is not None
 
 
 class AgentRegistry:
     """
-    第四轮版本：
-    - AgentRegistry 不再直接持有 dict
-    - 改为依赖 AgentRepository
-    - 继续发布 control events
+    Agent 注册中心
+
+    支持：
+    - 默认内存仓库
+    - 注入 PostgreSQL repository
+    - 注入 ControlBus，自动发布控制事件
     """
 
-    def __init__(
-        self,
-        admission: Optional[AgentAdmission] = None,
-        control_bus: Optional[ControlBus] = None,
-        agent_repository: Optional[AgentRepository] = None,
-    ):
-        self.admission = admission or AgentAdmission()
-        self.control_bus = control_bus or ControlBus()
-        self.agent_repository = agent_repository or InMemoryAgentRepository()
+    def __init__(self, repository=None, control_bus=None):
+        self._repository = repository or InMemoryAgentRepository()
+        self._control_bus = control_bus
 
-    def register(self, manifest: AgentManifest) -> AgentRecord:
-        decision: AdmissionDecision = self.admission.evaluate(manifest)
-        if not decision.allow:
-            raise ValueError(decision.reason or "AGENT_ADMISSION_DENIED")
+    async def register_agent(self, agent: dict[str, Any]) -> dict[str, Any]:
+        self._validate_agent(agent)
 
-        existing = self.agent_repository.get_by_name(manifest.name)
-        if existing:
-            previous_status = existing.status
+        normalized = {
+            "id": agent["id"],
+            "name": agent["name"],
+            "version": agent.get("version", "1.0.0"),
+            "status": agent.get("status", "active"),
+            "tenant_id": agent.get("tenant_id"),
+            "capabilities": agent.get("capabilities", {}),
+            "metadata": agent.get("metadata", {}),
+            "heartbeat_at": agent.get("heartbeat_at"),
+        }
 
-            existing.manifest = manifest
-            existing.status = "online"
-            existing.touch()
-            record = self.agent_repository.save(existing)
+        if "endpoint" in agent:
+            normalized["metadata"]["endpoint"] = agent["endpoint"]
 
-            self.control_bus.publish(
-                ControlEvent.new(
-                    event_type="agent.registered",
-                    aggregate_type="agent",
-                    aggregate_id=record.agent_id,
-                    payload={
-                        "agent_id": record.agent_id,
-                        "name": record.manifest.name,
-                        "version": record.manifest.version,
-                        "vendor": record.manifest.vendor,
-                        "endpoint": record.manifest.endpoint,
-                        "capabilities": list(record.manifest.capabilities),
-                        "supported_models": list(record.manifest.supported_models),
-                    },
-                    metadata={"mode": "update"},
-                )
-            )
+        saved = await self._repository.save(normalized)
 
-            if previous_status != record.status:
-                self.control_bus.publish(
-                    ControlEvent.new(
-                        event_type="agent.status.changed",
-                        aggregate_type="agent",
-                        aggregate_id=record.agent_id,
-                        payload={
-                            "agent_id": record.agent_id,
-                            "before": previous_status,
-                            "after": record.status,
-                        },
-                    )
-                )
-
-            return record
-
-        record = AgentRecord.new(manifest)
-        record.touch()
-        record = self.agent_repository.save(record)
-
-        self.control_bus.publish(
-            ControlEvent.new(
+        if self._control_bus:
+            await self._control_bus.publish(
                 event_type="agent.registered",
-                aggregate_type="agent",
-                aggregate_id=record.agent_id,
+                agent_id=saved["id"],
+                tenant_id=saved.get("tenant_id"),
                 payload={
-                    "agent_id": record.agent_id,
-                    "name": record.manifest.name,
-                    "version": record.manifest.version,
-                    "vendor": record.manifest.vendor,
-                    "endpoint": record.manifest.endpoint,
-                    "capabilities": list(record.manifest.capabilities),
-                    "supported_models": list(record.manifest.supported_models),
-                },
-                metadata={"mode": "create"},
-            )
-        )
-
-        self.control_bus.publish(
-            ControlEvent.new(
-                event_type="agent.status.changed",
-                aggregate_type="agent",
-                aggregate_id=record.agent_id,
-                payload={
-                    "agent_id": record.agent_id,
-                    "before": None,
-                    "after": record.status,
+                    "name": saved["name"],
+                    "version": saved["version"],
+                    "status": saved["status"],
                 },
             )
-        )
 
-        return record
+        return saved
 
-    def heartbeat(self, agent_id: str) -> AgentRecord:
-        record = self.agent_repository.get(agent_id)
-        if not record:
-            raise KeyError(f"AGENT_NOT_FOUND: {agent_id}")
+    async def heartbeat(self, agent_id: str) -> bool:
+        ok = await self._repository.touch_heartbeat(agent_id)
+        if not ok:
+            return False
 
-        previous_status = record.status
-        record.status = "online"
-        record.touch()
-        record = self.agent_repository.save(record)
-
-        self.control_bus.publish(
-            ControlEvent.new(
+        agent = await self._repository.get(agent_id)
+        if self._control_bus and agent:
+            await self._control_bus.publish(
                 event_type="agent.heartbeat",
-                aggregate_type="agent",
-                aggregate_id=record.agent_id,
-                payload={
-                    "agent_id": record.agent_id,
-                    "name": record.manifest.name,
-                    "status": record.status,
-                    "last_heartbeat": record.last_heartbeat,
-                },
+                agent_id=agent_id,
+                tenant_id=agent.get("tenant_id"),
+                payload={"heartbeat": "ok"},
             )
-        )
+        return True
 
-        if previous_status != record.status:
-            self.control_bus.publish(
-                ControlEvent.new(
-                    event_type="agent.status.changed",
-                    aggregate_type="agent",
-                    aggregate_id=record.agent_id,
-                    payload={
-                        "agent_id": record.agent_id,
-                        "before": previous_status,
-                        "after": record.status,
-                    },
-                )
+    async def update_status(self, agent_id: str, status: str) -> bool:
+        ok = await self._repository.update_status(agent_id, status)
+        if not ok:
+            return False
+
+        agent = await self._repository.get(agent_id)
+        if self._control_bus and agent:
+            await self._control_bus.publish(
+                event_type="agent.status.changed",
+                agent_id=agent_id,
+                tenant_id=agent.get("tenant_id"),
+                payload={"status": status},
             )
+        return True
 
-        return record
+    async def get_agent(self, agent_id: str) -> dict[str, Any] | None:
+        return await self._repository.get(agent_id)
 
-    def list_agents(self) -> List[AgentRecord]:
-        return self.agent_repository.list_all()
+    async def list_agents(self, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        return await self._repository.list(tenant_id=tenant_id)
 
-    def get_agent(self, agent_id: str) -> Optional[AgentRecord]:
-        return self.agent_repository.get(agent_id)
+    @staticmethod
+    def _validate_agent(agent: dict[str, Any]) -> None:
+        required_fields = ["id", "name"]
+        for field in required_fields:
+            if field not in agent or not agent[field]:
+                raise ValueError(f"Missing required field: {field}")
 
-    def list_control_events(
-        self,
-        *,
-        event_type: Optional[str] = None,
-        aggregate_id: Optional[str] = None,
-    ):
-        return self.control_bus.list_events(
-            event_type=event_type,
-            aggregate_id=aggregate_id,
-        )
+        endpoint = agent.get("endpoint")
+        if endpoint:
+            parsed = urlparse(endpoint)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(f"Invalid agent endpoint: {endpoint}")
