@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -78,51 +81,30 @@ async def list_agents(tenant_id: str | None = None):
 @app.get("/runtime/control-events")
 async def list_control_events(
     event_type: str | None = None,
-    agent_id: str | None = None,
     limit: int = 100,
 ):
-    events = await app.state.control_bus.list_events(
+    items = await app.state.control_bus.list_events(
         event_type=event_type,
-        agent_id=agent_id,
         limit=limit,
     )
     return {
         "ok": True,
-        "items": events,
-        "count": len(events),
-    }
-
-
-@app.post("/runtime/data-events/publish")
-async def publish_data_event(payload: dict):
-    event = await app.state.data_bus.publish(
-        event_type=payload["event_type"],
-        task_id=payload.get("task_id"),
-        execution_id=payload.get("execution_id"),
-        tenant_id=payload.get("tenant_id"),
-        payload=payload.get("payload", {}),
-    )
-    return {
-        "ok": True,
-        "event": event,
+        "items": items,
+        "count": len(items),
     }
 
 
 @app.get("/runtime/data-events")
 async def list_data_events(
     event_type: str | None = None,
-    task_id: str | None = None,
-    execution_id: str | None = None,
     limit: int = 100,
 ):
-    events = await app.state.data_bus.list_events(
+    items = await app.state.data_bus.list_events(
         event_type=event_type,
-        task_id=task_id,
-        execution_id=execution_id,
         limit=limit,
     )
     return {
         "ok": True,
-        "items": events,
-        "count": len(events),
+        "items": items,
+        "count": len(items),
     }

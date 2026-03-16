@@ -1,127 +1,237 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
-from uuid import uuid4
+from typing import Any, Dict, List, Optional
+
+from data_plane.event_envelope import EventEnvelope
+from data_plane.redis_stream_bus import RedisStreamBus
 
 
+DATA_EVENTS_STREAM = "data.events"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
 class InMemoryDataEventRepository:
-    """
-    默认内存版执行事件仓库
-    """
+    items: List[Dict[str, Any]] | None = None
 
-    def __init__(self):
-        self._events: list[dict[str, Any]] = []
+    def __post_init__(self) -> None:
+        if self.items is None:
+            self.items = []
 
-    async def append(self, event: dict[str, Any]) -> dict[str, Any]:
-        self._events.append(event)
+    async def save(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        self.items.append(event)
         return event
-
-    async def list(
-        self,
-        event_type: str | None = None,
-        task_id: str | None = None,
-        execution_id: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        events = self._events
-
-        if event_type:
-            events = [e for e in events if e.get("event_type") == event_type]
-
-        if task_id:
-            events = [e for e in events if e.get("task_id") == task_id]
-
-        if execution_id:
-            events = [e for e in events if e.get("execution_id") == execution_id]
-
-        return list(reversed(events))[:limit]
-
-
-class DataBus:
-    """
-    数据面事件总线
-
-    支持：
-    - 默认内存版
-    - 注入 PostgreSQL repository
-    """
-
-    def __init__(self, repository=None):
-        self._repository = repository or InMemoryDataEventRepository()
-
-    async def publish(
-        self,
-        event_type: str,
-        task_id: str | None = None,
-        execution_id: str | None = None,
-        tenant_id: str | None = None,
-        payload: dict[str, Any] | None = None,
-        event_id: str | None = None,
-    ) -> dict[str, Any]:
-        event = {
-            "id": event_id or str(uuid4()),
-            "task_id": task_id,
-            "execution_id": execution_id,
-            "event_type": event_type,
-            "tenant_id": tenant_id,
-            "payload": payload or {},
-            "occurred_at": datetime.now(timezone.utc),
-        }
-        return await self._repository.append(event)
-
-    async def publish_event(self, event: Any) -> dict[str, Any]:
-        normalized = self._normalize_event(event)
-        if "id" not in normalized or not normalized["id"]:
-            normalized["id"] = str(uuid4())
-        if "occurred_at" not in normalized or not normalized["occurred_at"]:
-            normalized["occurred_at"] = datetime.now(timezone.utc)
-        if "payload" not in normalized or normalized["payload"] is None:
-            normalized["payload"] = {}
-
-        return await self._repository.append(normalized)
 
     async def list_events(
         self,
         event_type: str | None = None,
-        task_id: str | None = None,
-        execution_id: str | None = None,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        return await self._repository.list(
-            event_type=event_type,
+    ) -> List[Dict[str, Any]]:
+        results = self.items
+        if event_type:
+            results = [x for x in results if x.get("event_type") == event_type]
+        return list(results[-limit:])[::-1]
+
+
+class DataBus:
+    def __init__(
+        self,
+        repository: InMemoryDataEventRepository | Any | None = None,
+        event_bus: RedisStreamBus | None = None,
+    ) -> None:
+        self.repository = repository or InMemoryDataEventRepository()
+        self.event_bus = event_bus
+
+    async def _repo_save(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        if hasattr(self.repository, "save"):
+            return await self.repository.save(event)
+        if hasattr(self.repository, "create"):
+            return await self.repository.create(event)
+        if hasattr(self.repository, "add"):
+            return await self.repository.add(event)
+        if hasattr(self.repository, "append"):
+            return await self.repository.append(event)
+        if hasattr(self.repository, "record"):
+            return await self.repository.record(event)
+
+        raise AttributeError(
+            f"{self.repository.__class__.__name__} does not support save/create/add/append/record"
+        )
+
+    async def _repo_list_events(
+        self,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if hasattr(self.repository, "list_events"):
+            return await self.repository.list_events(event_type=event_type, limit=limit)
+        if hasattr(self.repository, "list"):
+            return await self.repository.list(event_type=event_type, limit=limit)
+        if hasattr(self.repository, "get_events"):
+            return await self.repository.get_events(event_type=event_type, limit=limit)
+        if hasattr(self.repository, "query"):
+            return await self.repository.query(event_type=event_type, limit=limit)
+
+        return []
+
+    async def publish(
+        self,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        source: str = "data_plane",
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        final_payload: Dict[str, Any] = {}
+
+        if payload:
+            final_payload.update(payload)
+
+        reserved_keys = {"source", "tenant_id", "correlation_id"}
+        for key, value in kwargs.items():
+            if key not in reserved_keys:
+                final_payload[key] = value
+
+        task_id = kwargs.get("task_id") or final_payload.get("task_id")
+        workflow_id = kwargs.get("workflow_id") or final_payload.get("workflow_id")
+
+        event = {
+            "event_id": None,
+            "id": None,
+            "event_type": event_type,
+            "stream": DATA_EVENTS_STREAM,
+            "source": source,
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+            "tenant_id": tenant_id,
+            "correlation_id": correlation_id,
+            "payload": final_payload,
+            "occurred_at": utc_now_iso(),
+            "schema_version": "1.0",
+        }
+
+        if self.event_bus is not None:
+            envelope = EventEnvelope.new(
+                event_type=event_type,
+                stream=DATA_EVENTS_STREAM,
+                source=source,
+                payload=final_payload,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+            )
+            self.event_bus.publish(envelope)
+            event["event_id"] = envelope.event_id
+            event["id"] = envelope.event_id
+
+        saved = await self._repo_save(event)
+        return saved
+
+    async def router_success(
+        self,
+        *,
+        task_id: str,
+        route_to: str,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "task_id": task_id,
+            "route_to": route_to,
+        }
+        if extra:
+            payload["extra"] = extra
+
+        return await self.publish(
+            event_type="router.success",
             task_id=task_id,
-            execution_id=execution_id,
+            payload=payload,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+
+    async def router_failed(
+        self,
+        *,
+        task_id: str,
+        error: str,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "task_id": task_id,
+            "error": error,
+        }
+        if extra:
+            payload["extra"] = extra
+
+        return await self.publish(
+            event_type="router.failed",
+            task_id=task_id,
+            payload=payload,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+
+    async def workflow_started(
+        self,
+        *,
+        workflow_id: str,
+        task_id: str,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self.publish(
+            event_type="workflow.started",
+            workflow_id=workflow_id,
+            task_id=task_id,
+            payload={
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+            },
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+
+    async def workflow_completed(
+        self,
+        *,
+        workflow_id: str,
+        task_id: str,
+        result_summary: str,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return await self.publish(
+            event_type="workflow.completed",
+            workflow_id=workflow_id,
+            task_id=task_id,
+            payload={
+                "workflow_id": workflow_id,
+                "task_id": task_id,
+                "result_summary": result_summary,
+            },
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+
+    async def list_events(
+        self,
+        event_type: str | None = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        return await self._repo_list_events(
+            event_type=event_type,
             limit=limit,
         )
 
-    async def count_events(
-        self,
-        event_type: str | None = None,
-        task_id: str | None = None,
-        execution_id: str | None = None,
-    ) -> int:
-        events = await self.list_events(
-            event_type=event_type,
-            task_id=task_id,
-            execution_id=execution_id,
-            limit=100000,
-        )
-        return len(events)
-
-    @staticmethod
-    def _normalize_event(event: Any) -> dict[str, Any]:
-        if isinstance(event, dict):
-            return dict(event)
-
-        if is_dataclass(event):
-            return asdict(event)
-
-        if hasattr(event, "__dict__"):
-            return {
-                k: v for k, v in vars(event).items()
-                if not k.startswith("_")
-            }
-
-        raise TypeError(f"Unsupported event type: {type(event)}")
+    def ensure_consumer_group(self, group_name: str) -> None:
+        if self.event_bus is not None:
+            self.event_bus.ensure_group(DATA_EVENTS_STREAM, group_name)

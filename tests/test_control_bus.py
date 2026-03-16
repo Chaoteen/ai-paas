@@ -1,94 +1,66 @@
-from control_plane.agent_manifest import AgentManifest
-from control_plane.agent_registry import AgentRegistry
-from control_plane.control_bus import ControlBus
-from control_plane.repositories.agent_repository import InMemoryAgentRepository
-from control_plane.repositories.control_event_repository import InMemoryControlEventRepository
+from control_plane.control_bus import ControlBus, CONTROL_EVENTS_STREAM
+from data_plane.redis_stream_bus import RedisStreamBus
 
 
-def test_register_agent_publishes_control_events():
-    event_repo = InMemoryControlEventRepository()
-    control_bus = ControlBus(event_repository=event_repo)
-    agent_repo = InMemoryAgentRepository()
+class FakeRedis:
+    def __init__(self):
+        self.streams = {}
+        self.groups = {}
+        self.seq = 0
 
-    registry = AgentRegistry(
-        control_bus=control_bus,
-        agent_repository=agent_repo,
+    def ping(self):
+        return True
+
+    def xadd(self, stream, fields, maxlen=None, approximate=True):
+        self.seq += 1
+        msg_id = f"1-{self.seq}"
+        self.streams.setdefault(stream, []).append((msg_id, fields))
+        return msg_id
+
+    def xgroup_create(self, stream, group_name, id="0", mkstream=True):
+        self.groups.setdefault(stream, {})[group_name] = {"last_id": id}
+
+    def xreadgroup(self, group_name, consumer_name, streams, count=10, block=1000):
+        result = []
+        for stream, _cursor in streams.items():
+            msgs = self.streams.get(stream, [])[:count]
+            if msgs:
+                result.append((stream, msgs))
+        return result
+
+    def xack(self, stream, group_name, message_id):
+        return 1
+
+
+def test_control_bus_agent_registered():
+    bus = RedisStreamBus(FakeRedis())
+    control_bus = ControlBus(bus)
+
+    envelope = control_bus.agent_registered(
+        agent_id="agent-123",
+        agent_name="summary-agent",
+        tenant_id="tenant-1",
+        metadata={"version": "v1"},
     )
 
-    record = registry.register(
-        AgentManifest(
-            name="agent.code",
-            version="1.0.0",
-            vendor="ai-paas",
-            capabilities=["code.generate"],
-            supported_models=["qwen-8b"],
-            endpoint="http://127.0.0.1:9001",
-        )
+    assert envelope.stream == CONTROL_EVENTS_STREAM
+    assert envelope.event_type == "agent_registered"
+    assert envelope.payload["agent_id"] == "agent-123"
+    assert envelope.payload["agent_name"] == "summary-agent"
+    assert envelope.payload["metadata"]["version"] == "v1"
+
+
+def test_control_bus_status_changed():
+    bus = RedisStreamBus(FakeRedis())
+    control_bus = ControlBus(bus)
+
+    envelope = control_bus.agent_status_changed(
+        agent_id="agent-123",
+        from_status="idle",
+        to_status="running",
+        tenant_id="tenant-1",
     )
 
-    events = registry.list_control_events(aggregate_id=record.agent_id)
-    event_types = [e.event_type for e in events]
-
-    assert "agent.registered" in event_types
-    assert "agent.status.changed" in event_types
-
-
-def test_heartbeat_publishes_event():
-    event_repo = InMemoryControlEventRepository()
-    control_bus = ControlBus(event_repository=event_repo)
-    agent_repo = InMemoryAgentRepository()
-
-    registry = AgentRegistry(
-        control_bus=control_bus,
-        agent_repository=agent_repo,
-    )
-
-    record = registry.register(
-        AgentManifest(
-            name="agent.summary",
-            version="1.0.0",
-            vendor="ai-paas",
-            capabilities=["summary"],
-            supported_models=["qwen-8b"],
-            endpoint="http://127.0.0.1:9002",
-        )
-    )
-
-    registry.heartbeat(record.agent_id)
-
-    events = registry.list_control_events(aggregate_id=record.agent_id)
-    event_types = [e.event_type for e in events]
-
-    assert "agent.heartbeat" in event_types
-
-
-def test_filter_events_by_type():
-    event_repo = InMemoryControlEventRepository()
-    control_bus = ControlBus(event_repository=event_repo)
-    agent_repo = InMemoryAgentRepository()
-
-    registry = AgentRegistry(
-        control_bus=control_bus,
-        agent_repository=agent_repo,
-    )
-
-    record = registry.register(
-        AgentManifest(
-            name="agent.translate",
-            version="1.0.0",
-            vendor="ai-paas",
-            capabilities=["translate"],
-            supported_models=["qwen-8b"],
-            endpoint="http://127.0.0.1:9003",
-        )
-    )
-
-    registry.heartbeat(record.agent_id)
-
-    heartbeat_events = registry.list_control_events(
-        aggregate_id=record.agent_id,
-        event_type="agent.heartbeat",
-    )
-
-    assert len(heartbeat_events) == 1
-    assert heartbeat_events[0].event_type == "agent.heartbeat"
+    assert envelope.event_type == "agent_status_changed"
+    assert envelope.payload["from_status"] == "idle"
+    assert envelope.payload["to_status"] == "running"

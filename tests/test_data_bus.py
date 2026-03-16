@@ -1,49 +1,66 @@
-from data_plane.data_bus import DataBus
-from data_plane.data_events import DataEvent
-from data_plane.repositories.data_event_repository import InMemoryDataEventRepository
+from data_plane.data_bus import DataBus, DATA_EVENTS_STREAM
+from data_plane.redis_stream_bus import RedisStreamBus
 
 
-def test_publish_and_count_data_events():
-    repo = InMemoryDataEventRepository()
-    bus = DataBus(event_repository=repo)
+class FakeRedis:
+    def __init__(self):
+        self.streams = {}
+        self.groups = {}
+        self.seq = 0
 
-    bus.publish(
-        DataEvent.new(
-            event_type="task.created",
-            task_id="task_1",
-            envelope_id="env_1",
-        )
+    def ping(self):
+        return True
+
+    def xadd(self, stream, fields, maxlen=None, approximate=True):
+        self.seq += 1
+        msg_id = f"1-{self.seq}"
+        self.streams.setdefault(stream, []).append((msg_id, fields))
+        return msg_id
+
+    def xgroup_create(self, stream, group_name, id="0", mkstream=True):
+        self.groups.setdefault(stream, {})[group_name] = {"last_id": id}
+
+    def xreadgroup(self, group_name, consumer_name, streams, count=10, block=1000):
+        result = []
+        for stream, _cursor in streams.items():
+            msgs = self.streams.get(stream, [])[:count]
+            if msgs:
+                result.append((stream, msgs))
+        return result
+
+    def xack(self, stream, group_name, message_id):
+        return 1
+
+
+def test_data_bus_router_success():
+    bus = RedisStreamBus(FakeRedis())
+    data_bus = DataBus(bus)
+
+    envelope = data_bus.router_success(
+        task_id="task-1",
+        route_to="analysis",
+        tenant_id="tenant-a",
+        correlation_id="corr-1",
+        extra={"confidence": 0.98},
     )
-    bus.publish(
-        DataEvent.new(
-            event_type="task.completed",
-            task_id="task_1",
-            envelope_id="env_1",
-        )
+
+    assert envelope.stream == DATA_EVENTS_STREAM
+    assert envelope.event_type == "router.success"
+    assert envelope.payload["task_id"] == "task-1"
+    assert envelope.payload["route_to"] == "analysis"
+    assert envelope.payload["extra"]["confidence"] == 0.98
+
+
+def test_data_bus_router_failed():
+    bus = RedisStreamBus(FakeRedis())
+    data_bus = DataBus(bus)
+
+    envelope = data_bus.router_failed(
+        task_id="task-2",
+        error="no_route_found",
+        tenant_id="tenant-a",
     )
 
-    assert bus.count() == 2
-
-
-def test_filter_data_events():
-    repo = InMemoryDataEventRepository()
-    bus = DataBus(event_repository=repo)
-
-    bus.publish(
-        DataEvent.new(
-            event_type="task.created",
-            task_id="task_1",
-            envelope_id="env_1",
-        )
-    )
-    bus.publish(
-        DataEvent.new(
-            event_type="task.failed",
-            task_id="task_2",
-            envelope_id="env_2",
-        )
-    )
-
-    assert len(bus.list_events(event_type="task.created")) == 1
-    assert len(bus.list_events(task_id="task_2")) == 1
-    assert len(bus.list_events(envelope_id="env_1")) == 1
+    assert envelope.event_type == "router.failed"
+    assert envelope.payload["task_id"] == "task-2"
+    assert envelope.payload["error"] == "no_route_found"

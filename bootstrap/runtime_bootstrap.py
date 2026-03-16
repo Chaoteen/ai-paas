@@ -1,72 +1,199 @@
 from __future__ import annotations
 
+import inspect
 import os
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from control_plane.agent_registry import AgentRegistry, InMemoryAgentRepository
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from control_plane.agent_registry import AgentRegistry
 from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 from data_plane.data_bus import DataBus, InMemoryDataEventRepository
+from data_plane.redis_stream_bus import RedisStreamBus
+from contextlib import asynccontextmanager
 
-from persistence.db import Database
-from persistence.settings import PostgresSettings
-from persistence.models import Base as PersistenceBase
-
-from control_plane.repositories.postgres_agent_repository import PostgresAgentRepository
-from control_plane.repositories.postgres_control_event_repository import (
-    PostgresControlEventRepository,
-)
-from data_plane.repositories.postgres_data_event_repository import (
-    PostgresDataEventRepository,
-)
+def _normalize_database_url(url: str) -> str:
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+asyncpg://", 1)
+    return url
 
 
-def use_postgres_persistence() -> bool:
-    return os.getenv("AI_PAAS_USE_POSTGRES", "false").lower() == "true"
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-async def build_runtime_state() -> dict:
+@dataclass
+class RuntimeDB:
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+
+    @asynccontextmanager
+    async def session(self):
+        session = self.session_factory()
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
+
+
+@dataclass
+class InMemoryAgentRepository:
+    items: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    async def save(self, agent: Dict[str, Any]) -> Dict[str, Any]:
+        data = dict(agent)
+        data.setdefault("created_at", _utc_now_iso())
+        data.setdefault("updated_at", _utc_now_iso())
+        self.items[data["id"]] = data
+        return data
+
+    async def get(self, agent_id: str) -> Dict[str, Any] | None:
+        return self.items.get(agent_id)
+
+    async def list(self, tenant_id: str | None = None) -> List[Dict[str, Any]]:
+        values = list(self.items.values())
+        if tenant_id is not None:
+            values = [x for x in values if x.get("tenant_id") == tenant_id]
+        return values
+
+    async def delete(self, agent_id: str) -> bool:
+        if agent_id in self.items:
+            del self.items[agent_id]
+            return True
+        return False
+
+    async def update_status(self, agent_id: str, status: str) -> bool:
+        item = self.items.get(agent_id)
+        if not item:
+            return False
+        item["status"] = status
+        item["updated_at"] = _utc_now_iso()
+        return True
+
+    async def touch_heartbeat(self, agent_id: str) -> bool:
+        item = self.items.get(agent_id)
+        if not item:
+            return False
+        item["last_heartbeat_at"] = _utc_now_iso()
+        item["updated_at"] = _utc_now_iso()
+        return True
+
+
+def _get_persistence_mode() -> str:
+    return os.getenv("AI_PAAS_PERSISTENCE", "memory").strip().lower()
+
+
+def _get_event_bus_mode() -> str:
+    return os.getenv("AI_PAAS_EVENT_BUS", "memory").strip().lower()
+
+
+def _build_event_bus_if_needed() -> RedisStreamBus | None:
+    event_bus_mode = _get_event_bus_mode()
+    if event_bus_mode != "redis":
+        return None
+    return RedisStreamBus.from_env()
+
+
+def _build_runtime_db() -> RuntimeDB:
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required when AI_PAAS_PERSISTENCE=postgres")
+
+    normalized_url = _normalize_database_url(database_url)
+    engine = create_async_engine(normalized_url, future=True, echo=False)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    return RuntimeDB(engine=engine, session_factory=session_factory)
+
+
+def _instantiate_repository(repo_cls: Any, db: RuntimeDB) -> Any:
     """
-    构建运行时依赖：
-    - agent_registry
-    - control_bus
-    - data_bus
-    - db（可选）
+    兼容不同 repository 构造签名：
+    - Repo(db)
+    - Repo(session_factory=...)
+    - Repo(session_maker=...)
+    - Repo(engine=...)
+    - Repo()
     """
-    if use_postgres_persistence():
-        settings = PostgresSettings(
-            host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
-            port=int(os.getenv("POSTGRES_PORT", "5432")),
-            database=os.getenv("POSTGRES_DB", "ai_paas"),
-            user=os.getenv("POSTGRES_USER", "postgres"),
-            password=os.getenv("POSTGRES_PASSWORD", "postgres"),
-            echo=os.getenv("POSTGRES_ECHO", "false").lower() == "true",
-        )
-        db = Database(settings)
+    sig = inspect.signature(repo_cls.__init__)
+    params = list(sig.parameters.keys())[1:]  # skip self
 
-        async with db.engine.begin() as conn:
-            await conn.run_sync(PersistenceBase.metadata.create_all)
+    if not params:
+        return repo_cls()
 
-        agent_repo = PostgresAgentRepository(db)
-        control_repo = PostgresControlEventRepository(db)
-        data_repo = PostgresDataEventRepository(db)
+    kwargs: Dict[str, Any] = {}
 
-        control_bus = ControlBus(repository=control_repo)
-        data_bus = DataBus(repository=data_repo)
-        agent_registry = AgentRegistry(repository=agent_repo, control_bus=control_bus)
+    if "db" in params:
+        kwargs["db"] = db
+    if "session_factory" in params:
+        kwargs["session_factory"] = db.session_factory
+    if "session_maker" in params:
+        kwargs["session_maker"] = db.session_factory
+    if "engine" in params:
+        kwargs["engine"] = db.engine
 
-        return {
-            "mode": "postgres",
-            "db": db,
-            "agent_registry": agent_registry,
-            "control_bus": control_bus,
-            "data_bus": data_bus,
-        }
+    if kwargs:
+        return repo_cls(**kwargs)
 
-    control_bus = ControlBus(repository=InMemoryControlEventRepository())
-    data_bus = DataBus(repository=InMemoryDataEventRepository())
-    agent_registry = AgentRegistry(
-        repository=InMemoryAgentRepository(),
-        control_bus=control_bus,
-    )
+    if len(params) == 1:
+        return repo_cls(db)
+
+    return repo_cls()
+
+
+def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegistry:
+    sig = inspect.signature(AgentRegistry.__init__)
+    params = list(sig.parameters.keys())[1:]  # skip self
+
+    kwargs: Dict[str, Any] = {}
+
+    if "agent_repository" in params:
+        kwargs["agent_repository"] = agent_repository
+    elif "repository" in params:
+        kwargs["repository"] = agent_repository
+    elif "repo" in params:
+        kwargs["repo"] = agent_repository
+
+    if "control_bus" in params:
+        kwargs["control_bus"] = control_bus
+
+    if kwargs:
+        return AgentRegistry(**kwargs)
+
+    if len(params) >= 2:
+        return AgentRegistry(agent_repository, control_bus)
+
+    if len(params) == 1:
+        return AgentRegistry(agent_repository)
+
+    return AgentRegistry()
+
+
+async def _build_memory_runtime_state() -> Dict[str, Any]:
+    event_bus = _build_event_bus_if_needed()
+
+    control_repo = InMemoryControlEventRepository()
+    data_repo = InMemoryDataEventRepository()
+    agent_repo = InMemoryAgentRepository()
+
+    control_bus = ControlBus(repository=control_repo, event_bus=event_bus)
+    data_bus = DataBus(repository=data_repo, event_bus=event_bus)
+
+    if event_bus is not None:
+        control_bus.ensure_consumer_group("control-plane-workers")
+        data_bus.ensure_consumer_group("data-plane-workers")
+
+    agent_registry = _build_agent_registry(agent_repo, control_bus)
 
     return {
         "mode": "memory",
@@ -75,3 +202,42 @@ async def build_runtime_state() -> dict:
         "control_bus": control_bus,
         "data_bus": data_bus,
     }
+
+
+async def _build_postgres_runtime_state() -> Dict[str, Any]:
+    db = _build_runtime_db()
+    event_bus = _build_event_bus_if_needed()
+
+    from control_plane.repositories.postgres_agent_repository import PostgresAgentRepository
+    from control_plane.repositories.postgres_control_event_repository import PostgresControlEventRepository
+    from data_plane.repositories.postgres_data_event_repository import PostgresDataEventRepository
+
+    agent_repo = _instantiate_repository(PostgresAgentRepository, db)
+    control_repo = _instantiate_repository(PostgresControlEventRepository, db)
+    data_repo = _instantiate_repository(PostgresDataEventRepository, db)
+
+    control_bus = ControlBus(repository=control_repo, event_bus=event_bus)
+    data_bus = DataBus(repository=data_repo, event_bus=event_bus)
+
+    if event_bus is not None:
+        control_bus.ensure_consumer_group("control-plane-workers")
+        data_bus.ensure_consumer_group("data-plane-workers")
+
+    agent_registry = _build_agent_registry(agent_repo, control_bus)
+
+    return {
+        "mode": "postgres",
+        "db": db,
+        "agent_registry": agent_registry,
+        "control_bus": control_bus,
+        "data_bus": data_bus,
+    }
+
+
+async def build_runtime_state() -> Dict[str, Any]:
+    mode = _get_persistence_mode()
+
+    if mode == "postgres":
+        return await _build_postgres_runtime_state()
+
+    return await _build_memory_runtime_state()
