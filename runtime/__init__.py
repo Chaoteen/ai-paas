@@ -1,6 +1,7 @@
 from .agent_runtime import AgentRuntime, AgentRuntimeResult
 from .capability_guard import CapabilityGuard, CapabilityGuardDecision
 from .execution_context import ExecutionContext
+from .sandbox_executor import SandboxDecision, SandboxExecutor
 from .skill_manifest import SkillManifest
 from .skill_registry import SkillRegistry
 from .skill_resolver import SkillResolver
@@ -23,6 +24,8 @@ __all__ = [
     "CapabilityGuard",
     "CapabilityGuardDecision",
     "ExecutionContext",
+    "SandboxDecision",
+    "SandboxExecutor",
     "SkillManifest",
     "SkillRegistry",
     "SkillResolver",

@@ -1,6 +1,7 @@
 import pytest
 
 from runtime.execution_context import ExecutionContext
+from runtime.sandbox_executor import SandboxExecutor
 from runtime.skill_manifest import SkillManifest
 from runtime.tool_executor import ToolExecutor
 
@@ -38,6 +39,7 @@ async def test_tool_executor_allows_echo_without_capability():
 
     assert result["tool_name"] == "echo"
     assert result["status"] == "ok"
+    assert result["metadata"]["sandbox_mode"] == "deny_unsafe"
 
 
 @pytest.mark.asyncio
@@ -83,3 +85,51 @@ async def test_tool_executor_allows_http_fetch_with_network():
     assert result["tool_name"] == "http.fetch"
     assert result["status"] == "ok"
     assert result["result"]["url"] == "https://example.com"
+    assert result["metadata"]["sandbox_mode"] == "deny_unsafe"
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_blocks_shell_run_in_default_sandbox():
+    executor = ToolExecutor()
+    context = ExecutionContext(
+        task_id="task-004",
+        tenant_id="tenant-a",
+        input_payload={"text": "hello"},
+        allowed_capabilities=["shell"],
+    )
+    skill = build_skill("shell-skill")
+
+    with pytest.raises(RuntimeError) as exc:
+        await executor.execute(
+            context=context,
+            skill=skill,
+            tool_name="shell.run",
+            arguments={"command": "ls"},
+        )
+
+    assert "blocked by sandbox policy" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_allows_shell_run_in_inline_sandbox():
+    executor = ToolExecutor(
+        sandbox_executor=SandboxExecutor(sandbox_mode="inline"),
+    )
+    context = ExecutionContext(
+        task_id="task-005",
+        tenant_id="tenant-a",
+        input_payload={"text": "hello"},
+        allowed_capabilities=["shell"],
+    )
+    skill = build_skill("shell-skill")
+
+    result = await executor.execute(
+        context=context,
+        skill=skill,
+        tool_name="shell.run",
+        arguments={"command": "ls"},
+    )
+
+    assert result["tool_name"] == "shell.run"
+    assert result["status"] == "ok"
+    assert result["metadata"]["sandbox_mode"] == "inline"
