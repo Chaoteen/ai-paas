@@ -41,6 +41,8 @@ async def lifespan(app: FastAPI):
     app.state.agent_runtime = runtime_state.get("agent_runtime")
     app.state.state_store = runtime_state.get("state_store")
     app.state.idempotency_store = runtime_state.get("idempotency_store")
+    app.state.trace_store = runtime_state.get("trace_store")
+    app.state.runtime_metrics = runtime_state.get("runtime_metrics")
     app.state.router_worker = runtime_state.get("router_worker")
     app.state.agent_worker = runtime_state.get("agent_worker")
 
@@ -92,6 +94,8 @@ async def runtime_info() -> Dict[str, Any]:
         "has_agent_runtime": app.state.agent_runtime is not None,
         "has_state_store": app.state.state_store is not None,
         "has_idempotency_store": app.state.idempotency_store is not None,
+        "has_trace_store": app.state.trace_store is not None,
+        "has_runtime_metrics": app.state.runtime_metrics is not None,
         "router_worker": app.state.router_worker is not None,
         "agent_worker": app.state.agent_worker is not None,
     }
@@ -132,7 +136,6 @@ async def list_agents(
 
 @app.post("/runtime/tasks/submit")
 async def submit_task(req: TaskSubmitRequest) -> Dict[str, Any]:
-    # Phase 11-D: submit 幂等
     if app.state.state_store is not None:
         existing = await app.state.state_store.get_task(req.task_id)
         if existing is not None:
@@ -261,4 +264,31 @@ async def get_workflow_state(workflow_id: str) -> Dict[str, Any]:
     return {
         "ok": True,
         "item": workflow_state.to_dict(),
+    }
+
+
+@app.get("/runtime/trace/{task_id}")
+async def get_trace(task_id: str) -> Dict[str, Any]:
+    trace_store = app.state.trace_store
+    if trace_store is None:
+        raise HTTPException(status_code=503, detail="trace_store_not_configured")
+
+    items = await trace_store.get_trace(task_id)
+    return {
+        "ok": True,
+        "items": [x.to_dict() for x in items],
+        "count": len(items),
+    }
+
+
+@app.get("/runtime/metrics")
+async def get_metrics() -> Dict[str, Any]:
+    runtime_metrics = app.state.runtime_metrics
+    if runtime_metrics is None:
+        raise HTTPException(status_code=503, detail="runtime_metrics_not_configured")
+
+    snapshot = await runtime_metrics.snapshot()
+    return {
+        "ok": True,
+        "items": snapshot,
     }

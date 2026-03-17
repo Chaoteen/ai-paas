@@ -17,10 +17,12 @@ from runtime.agent_runtime import AgentRuntime
 from runtime.idempotency import InMemoryIdempotencyStore
 from runtime.llm_adapter import NoopLLMAdapter
 from runtime.policy_engine import PolicyEngine
+from runtime.runtime_metrics import InMemoryRuntimeMetrics
 from runtime.skill_registry import SkillRegistry
 from runtime.skill_resolver import SkillResolver
 from runtime.state_store import InMemoryRuntimeStateStore
 from runtime.tool_executor import ToolExecutor
+from runtime.trace_store import InMemoryTraceStore
 
 
 def _normalize_database_url(url: str) -> str:
@@ -261,9 +263,16 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
     control_repo = InMemoryControlEventRepository()
     data_repo = InMemoryDataEventRepository()
     agent_repo = InMemoryAgentRepository()
+    trace_store = InMemoryTraceStore()
+    runtime_metrics = InMemoryRuntimeMetrics()
 
     control_bus = ControlBus(repository=control_repo, event_bus=event_bus)
-    data_bus = DataBus(repository=data_repo, event_bus=event_bus)
+    data_bus = DataBus(
+        repository=data_repo,
+        event_bus=event_bus,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+    )
 
     if event_bus is not None:
         control_bus.ensure_consumer_group("control-plane-workers")
@@ -293,6 +302,8 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         "agent_runtime": agent_runtime,
         "state_store": state_store,
         "idempotency_store": idempotency_store,
+        "trace_store": trace_store,
+        "runtime_metrics": runtime_metrics,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }
@@ -309,9 +320,16 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
     agent_repo = _instantiate_repository(PostgresAgentRepository, db)
     control_repo = _instantiate_repository(PostgresControlEventRepository, db)
     data_repo = _instantiate_repository(PostgresDataEventRepository, db)
+    trace_store = InMemoryTraceStore()
+    runtime_metrics = InMemoryRuntimeMetrics()
 
     control_bus = ControlBus(repository=control_repo, event_bus=event_bus)
-    data_bus = DataBus(repository=data_repo, event_bus=event_bus)
+    data_bus = DataBus(
+        repository=data_repo,
+        event_bus=event_bus,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+    )
 
     if event_bus is not None:
         control_bus.ensure_consumer_group("control-plane-workers")
@@ -341,6 +359,8 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         "agent_runtime": agent_runtime,
         "state_store": state_store,
         "idempotency_store": idempotency_store,
+        "trace_store": trace_store,
+        "runtime_metrics": runtime_metrics,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }

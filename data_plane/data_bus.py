@@ -38,9 +38,13 @@ class DataBus:
         self,
         repository: InMemoryDataEventRepository | Any | None = None,
         event_bus: RedisStreamBus | None = None,
+        trace_store: Any | None = None,
+        runtime_metrics: Any | None = None,
     ) -> None:
         self.repository = repository or InMemoryDataEventRepository()
         self.event_bus = event_bus
+        self.trace_store = trace_store
+        self.runtime_metrics = runtime_metrics
 
     async def _repo_save(self, event: Dict[str, Any]) -> Dict[str, Any]:
         if hasattr(self.repository, "save"):
@@ -76,6 +80,12 @@ class DataBus:
         if self.event_bus is None:
             return
         await asyncio.to_thread(self.event_bus.publish, envelope)
+
+    async def _observe_event(self, event: Dict[str, Any]) -> None:
+        if self.trace_store is not None:
+            await self.trace_store.append_event(event)
+        if self.runtime_metrics is not None:
+            await self.runtime_metrics.record_event(event)
 
     async def publish(
         self,
@@ -120,6 +130,7 @@ class DataBus:
 
         event = envelope.to_dict()
         saved = await self._repo_save(event)
+        await self._observe_event(saved)
         await self._publish_to_event_bus(envelope)
         return saved
 
