@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from runtime.execution_context import ExecutionContext
 from runtime.model_backed_llm_adapter import ModelBackedLLMAdapter
-from runtime.model_service import ModelInvocationContext
 from runtime.skill_manifest import SkillManifest
 from runtime.models.types import (
     ChatMessage,
     MessageRole,
-    ModelCapability,
     ModelProvider,
     ModelResponse,
     UsageInfo,
@@ -19,7 +19,7 @@ class FakeModelService:
         self.last_request = None
         self.last_context = None
 
-    def generate(self, *, request, context):
+    async def generate(self, *, request, context):
         self.last_request = request
         self.last_context = context
         return ModelResponse(
@@ -35,7 +35,8 @@ class FakeModelService:
         )
 
 
-def test_model_backed_llm_adapter_uses_runtime_aligned_fields() -> None:
+@pytest.mark.asyncio
+async def test_model_backed_llm_adapter_uses_runtime_aligned_fields() -> None:
     adapter = ModelBackedLLMAdapter(
         model_service=FakeModelService(),
         default_model_ref="default",
@@ -75,15 +76,11 @@ def test_model_backed_llm_adapter_uses_runtime_aligned_fields() -> None:
         priority=100,
     )
 
-    import asyncio
-
-    result = asyncio.run(
-        adapter.generate(
-            context=context,
-            skill=skill,
-            prompt="Hello runtime",
-            config=skill.llm,
-        )
+    result = await adapter.generate(
+        context=context,
+        skill=skill,
+        prompt="Hello runtime",
+        config=skill.llm,
     )
 
     assert result["provider"] == "ollama"
@@ -100,7 +97,8 @@ def test_model_backed_llm_adapter_uses_runtime_aligned_fields() -> None:
     assert adapter.model_service.last_request.messages[0].content == "Hello runtime"
 
 
-def test_model_backed_llm_adapter_resolves_provider_model_ref() -> None:
+@pytest.mark.asyncio
+async def test_model_backed_llm_adapter_resolves_provider_model_ref() -> None:
     adapter = ModelBackedLLMAdapter(
         model_service=FakeModelService(),
         default_model_ref="default",
@@ -140,15 +138,11 @@ def test_model_backed_llm_adapter_resolves_provider_model_ref() -> None:
         priority=100,
     )
 
-    import asyncio
-
-    asyncio.run(
-        adapter.generate(
-            context=context,
-            skill=skill,
-            prompt="Hello runtime",
-            config=skill.llm,
-        )
+    await adapter.generate(
+        context=context,
+        skill=skill,
+        prompt="Hello runtime",
+        config=skill.llm,
     )
 
     assert adapter.model_service.last_context.model_ref == "openai:gpt-4o-mini"

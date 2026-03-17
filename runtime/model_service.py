@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -25,6 +26,7 @@ class ModelInvocationContext:
     model_ref: Optional[str] = None
     provider: Optional[ModelProvider] = None
     requires: frozenset[ModelCapability] = frozenset()
+    routing_policy: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -35,6 +37,7 @@ class ModelInvocationContext:
         model_ref: Optional[str] = None,
         provider: Optional[ModelProvider] = None,
         requires: Optional[frozenset[ModelCapability]] = None,
+        routing_policy: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "ModelInvocationContext":
         return cls(
@@ -46,6 +49,7 @@ class ModelInvocationContext:
             model_ref=model_ref,
             provider=provider,
             requires=requires or frozenset(),
+            routing_policy=routing_policy,
             metadata=metadata or dict(context.metadata),
         )
 
@@ -76,7 +80,7 @@ class ModelService:
     def registry(self) -> ModelRegistry:
         return self._registry
 
-    def generate(
+    async def generate(
         self,
         *,
         request: ModelRequest,
@@ -87,17 +91,19 @@ class ModelService:
                 model_ref=context.model_ref,
                 provider=context.provider,
                 requires=context.requires,
+                routing_policy=context.routing_policy,
             )
         )
         adapter = self._registry.create_adapter(selection.registry_key)
 
         started = time.perf_counter()
-        self._emit_trace_event(
-            event_name="model.invoking",
+        await self._emit_trace_event(
+            event_type="model.invoking",
             context=context,
             payload={
                 "provider": selection.provider.value,
                 "model_name": selection.model_name,
+                "routing_policy": context.routing_policy,
                 "has_tools": bool(request.tools),
                 "stream": request.stream,
             },
@@ -107,23 +113,25 @@ class ModelService:
             response = adapter.generate(request)
         except Exception as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
-            self._emit_trace_event(
-                event_name="model.failed",
+            await self._emit_trace_event(
+                event_type="model.failed",
                 context=context,
                 payload={
                     "provider": selection.provider.value,
                     "model_name": selection.model_name,
+                    "routing_policy": context.routing_policy,
                     "latency_ms": elapsed_ms,
                     "error_type": exc.__class__.__name__,
                     "error": str(exc),
                 },
             )
-            self._emit_metric(
-                name="runtime_model_failures_total",
-                value=1,
-                labels={
+            await self._emit_metric_event(
+                event_type="model.failed",
+                context=context,
+                payload={
                     "provider": selection.provider.value,
                     "model_name": selection.model_name,
+                    "routing_policy": context.routing_policy,
                     "error_type": exc.__class__.__name__,
                 },
             )
@@ -131,12 +139,13 @@ class ModelService:
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        self._emit_trace_event(
-            event_name="model.completed",
+        await self._emit_trace_event(
+            event_type="model.completed",
             context=context,
             payload={
                 "provider": response.provider.value,
                 "model_name": response.model_name,
+                "routing_policy": context.routing_policy,
                 "latency_ms": response.latency_ms or elapsed_ms,
                 "finish_reason": response.finish_reason,
                 "prompt_tokens": response.usage.prompt_tokens,
@@ -145,90 +154,100 @@ class ModelService:
             },
         )
 
-        self._emit_metric(
-            name="runtime_model_calls_total",
-            value=1,
-            labels={
+        await self._emit_metric_event(
+            event_type="model.completed",
+            context=context,
+            payload={
                 "provider": response.provider.value,
                 "model_name": response.model_name,
-            },
-        )
-        self._emit_metric(
-            name="runtime_model_latency_ms",
-            value=response.latency_ms or elapsed_ms,
-            labels={
-                "provider": response.provider.value,
-                "model_name": response.model_name,
-            },
-        )
-        self._emit_metric(
-            name="runtime_model_tokens_total",
-            value=response.usage.total_tokens,
-            labels={
-                "provider": response.provider.value,
-                "model_name": response.model_name,
+                "routing_policy": context.routing_policy,
+                "latency_ms": response.latency_ms or elapsed_ms,
+                "total_tokens": response.usage.total_tokens,
             },
         )
 
         return response
 
-    def _emit_trace_event(
+    async def _emit_trace_event(
         self,
         *,
-        event_name: str,
+        event_type: str,
         context: ModelInvocationContext,
         payload: Dict[str, Any],
     ) -> None:
         if self._trace_store is None:
             return
 
-        trace_methods = [
-            "append_event",
-            "record_event",
-            "add_event",
-            "write_event",
-        ]
-        trace_payload = {
+        event = {
+            "event_type": event_type,
+            "task_id": context.task_id,
             "workflow_id": context.workflow_id,
             "tenant_id": context.tenant_id,
             "correlation_id": context.correlation_id,
-            "user_id": context.user_id,
-            **context.metadata,
-            **payload,
+            "source": "runtime.model_service",
+            "payload": {
+                "user_id": context.user_id,
+                **context.metadata,
+                **payload,
+            },
         }
 
-        for method_name in trace_methods:
+        append_event = getattr(self._trace_store, "append_event", None)
+        if callable(append_event):
+            result = append_event(event)
+            if inspect.isawaitable(result):
+                await result
+            return
+
+        for method_name in ("record_event", "add_event", "write_event"):
             method = getattr(self._trace_store, method_name, None)
             if callable(method):
-                try:
-                    method(
-                        task_id=context.task_id,
-                        event_name=event_name,
-                        payload=trace_payload,
-                    )
-                except TypeError:
-                    method(context.task_id, event_name, trace_payload)
+                result = method(event)
+                if inspect.isawaitable(result):
+                    await result
                 return
 
-    def _emit_metric(self, *, name: str, value: int, labels: Dict[str, str]) -> None:
+    async def _emit_metric_event(
+        self,
+        *,
+        event_type: str,
+        context: ModelInvocationContext,
+        payload: Dict[str, Any],
+    ) -> None:
         if self._runtime_metrics is None:
             return
 
-        metric_methods = [
-            "observe",
-            "record",
-            "increment",
-            "add_metric",
-        ]
-        for method_name in metric_methods:
+        event = {
+            "event_type": event_type,
+            "task_id": context.task_id,
+            "workflow_id": context.workflow_id,
+            "tenant_id": context.tenant_id,
+            "correlation_id": context.correlation_id,
+            "source": "runtime.model_service",
+            "payload": {
+                "user_id": context.user_id,
+                **context.metadata,
+                **payload,
+            },
+        }
+
+        record_event = getattr(self._runtime_metrics, "record_event", None)
+        if callable(record_event):
+            result = record_event(event)
+            if inspect.isawaitable(result):
+                await result
+            return
+
+        for method_name in ("observe", "record", "increment", "add_metric"):
             method = getattr(self._runtime_metrics, method_name, None)
             if callable(method):
                 try:
-                    method(name=name, value=value, labels=labels)
+                    result = method(event_type, payload)
                 except TypeError:
                     try:
-                        method(name, value, labels)
+                        result = method(name=event_type, value=1, labels=payload)
                     except TypeError:
-                        if method_name == "increment":
-                            method(name)
+                        result = method(event)
+                if inspect.isawaitable(result):
+                    await result
                 return

@@ -47,7 +47,7 @@ class ModelBackedLLMAdapter(BaseLLMAdapter):
             config=config,
             request=request,
         )
-        response = self.model_service.generate(
+        response = await self.model_service.generate(
             request=request,
             context=invocation_context,
         )
@@ -118,6 +118,8 @@ class ModelBackedLLMAdapter(BaseLLMAdapter):
     ) -> ModelInvocationContext:
         provider = self._parse_provider(config.get("provider"))
         model_ref = self._resolve_model_ref(config=config)
+        routing_policy = self._resolve_routing_policy(config=config)
+
         requires = {ModelCapability.CHAT}
         if request.tools:
             requires.add(ModelCapability.TOOLS)
@@ -138,17 +140,11 @@ class ModelBackedLLMAdapter(BaseLLMAdapter):
             model_ref=model_ref,
             provider=provider,
             requires=frozenset(requires),
+            routing_policy=routing_policy,
             metadata=merged_metadata,
         )
 
     def _resolve_model_ref(self, *, config: Dict[str, Any]) -> Optional[str]:
-        """
-        Priority:
-        1. skill.llm.model_ref
-        2. skill.llm.alias
-        3. provider:model
-        4. default_model_ref
-        """
         model_ref = config.get("model_ref")
         if isinstance(model_ref, str) and model_ref.strip():
             return model_ref.strip()
@@ -163,6 +159,12 @@ class ModelBackedLLMAdapter(BaseLLMAdapter):
             return f"{provider.strip().lower()}:{model.strip()}"
 
         return self.default_model_ref
+
+    def _resolve_routing_policy(self, *, config: Dict[str, Any]) -> Optional[str]:
+        value = config.get("routing_policy")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+        return None
 
     def _parse_provider(self, value: Any) -> Optional[ModelProvider]:
         if not isinstance(value, str) or not value.strip():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from runtime.model_service import ModelInvocationContext
 from runtime.execution_context import ExecutionContext
+from runtime.model_service import ModelInvocationContext
 
 
 def test_model_invocation_context_aligns_with_execution_context() -> None:

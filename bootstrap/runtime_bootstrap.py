@@ -7,15 +7,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
+from bootstrap.model_bootstrap import build_model_backed_llm_adapter
 from control_plane.agent_registry import AgentRegistry
 from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 from data_plane.data_bus import DataBus, InMemoryDataEventRepository
 from data_plane.redis_stream_bus import RedisStreamBus
 from runtime.agent_runtime import AgentRuntime
 from runtime.idempotency import InMemoryIdempotencyStore
-from runtime.llm_adapter import NoopLLMAdapter
 from runtime.policy_engine import PolicyEngine
 from runtime.runtime_metrics import InMemoryRuntimeMetrics
 from runtime.skill_registry import SkillRegistry
@@ -150,10 +155,8 @@ def _instantiate_repository(repo_cls: Any, db: RuntimeDB) -> Any:
 
     if kwargs:
         return repo_cls(**kwargs)
-
     if len(params) == 1:
         return repo_cls(db)
-
     return repo_cls()
 
 
@@ -174,12 +177,10 @@ def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegis
 
     if kwargs:
         return AgentRegistry(**kwargs)
-
     if len(params) >= 2:
         return AgentRegistry(agent_repository, control_bus)
     if len(params) == 1:
         return AgentRegistry(agent_repository)
-
     return AgentRegistry()
 
 
@@ -190,9 +191,16 @@ def _split_extra_skill_dirs(value: str | None) -> list[str]:
     return [x for x in items if x]
 
 
-def _build_agent_runtime(data_bus: DataBus) -> AgentRuntime:
+def _build_agent_runtime(
+    data_bus: DataBus,
+    trace_store: Any | None = None,
+    runtime_metrics: Any | None = None,
+) -> AgentRuntime:
     bundled_dir = os.getenv("AI_PAAS_BUNDLED_SKILLS_DIR", "skills/bundled")
-    local_dir = os.getenv("AI_PAAS_LOCAL_SKILLS_DIR", os.path.expanduser("~/.ai-paas/skills"))
+    local_dir = os.getenv(
+        "AI_PAAS_LOCAL_SKILLS_DIR",
+        os.path.expanduser("~/.ai-paas/skills"),
+    )
     workspace_dir = os.getenv("AI_PAAS_WORKSPACE_SKILLS_DIR")
     extra_dirs = _split_extra_skill_dirs(os.getenv("AI_PAAS_EXTRA_SKILL_DIRS"))
 
@@ -204,7 +212,14 @@ def _build_agent_runtime(data_bus: DataBus) -> AgentRuntime:
     )
     resolver = SkillResolver(registry)
     policy_engine = PolicyEngine()
-    llm_adapter = NoopLLMAdapter()
+
+    llm_adapter = build_model_backed_llm_adapter(
+        config=None,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+        default_model_ref=os.getenv("AI_PAAS_DEFAULT_MODEL_REF"),
+    )
+
     tool_executor = ToolExecutor()
 
     return AgentRuntime(
@@ -217,7 +232,11 @@ def _build_agent_runtime(data_bus: DataBus) -> AgentRuntime:
     )
 
 
-def _build_router_worker_if_possible(agent_registry: Any, data_bus: DataBus, event_bus: RedisStreamBus | None):
+def _build_router_worker_if_possible(
+    agent_registry: Any,
+    data_bus: DataBus,
+    event_bus: RedisStreamBus | None,
+):
     if event_bus is None:
         return None
 
@@ -263,6 +282,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
     control_repo = InMemoryControlEventRepository()
     data_repo = InMemoryDataEventRepository()
     agent_repo = InMemoryAgentRepository()
+
     trace_store = InMemoryTraceStore()
     runtime_metrics = InMemoryRuntimeMetrics()
 
@@ -279,7 +299,12 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
-    agent_runtime = _build_agent_runtime(data_bus)
+    agent_runtime = _build_agent_runtime(
+        data_bus,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+    )
+
     state_store = InMemoryRuntimeStateStore()
     idempotency_store = InMemoryIdempotencyStore()
 
@@ -314,12 +339,17 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
     event_bus = _build_event_bus_if_needed()
 
     from control_plane.repositories.postgres_agent_repository import PostgresAgentRepository
-    from control_plane.repositories.postgres_control_event_repository import PostgresControlEventRepository
-    from data_plane.repositories.postgres_data_event_repository import PostgresDataEventRepository
+    from control_plane.repositories.postgres_control_event_repository import (
+        PostgresControlEventRepository,
+    )
+    from data_plane.repositories.postgres_data_event_repository import (
+        PostgresDataEventRepository,
+    )
 
     agent_repo = _instantiate_repository(PostgresAgentRepository, db)
     control_repo = _instantiate_repository(PostgresControlEventRepository, db)
     data_repo = _instantiate_repository(PostgresDataEventRepository, db)
+
     trace_store = InMemoryTraceStore()
     runtime_metrics = InMemoryRuntimeMetrics()
 
@@ -336,7 +366,12 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
-    agent_runtime = _build_agent_runtime(data_bus)
+    agent_runtime = _build_agent_runtime(
+        data_bus,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+    )
+
     state_store = InMemoryRuntimeStateStore()
     idempotency_store = InMemoryIdempotencyStore()
 

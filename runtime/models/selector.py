@@ -5,7 +5,8 @@ from typing import Optional
 
 from runtime.models.exceptions import ModelRegistryError
 from runtime.models.model_registry import ModelRegistry
-from runtime.models.types import ModelCapability, ModelConfig, ModelProvider
+from runtime.models.routing_policy import get_routing_policy
+from runtime.models.types import ModelCapability, ModelConfig, ModelProvider, RegistryFilter
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,7 @@ class ModelSelectionInput:
     model_ref: Optional[str] = None
     provider: Optional[ModelProvider] = None
     requires: frozenset[ModelCapability] = frozenset()
+    routing_policy: Optional[str] = None
 
 
 class ModelSelector:
@@ -21,10 +23,11 @@ class ModelSelector:
 
     Order:
     1. explicit model_ref
-    2. provider + requires
-    3. provider default
-    4. alias 'default'
-    5. any enabled model matching requires
+    2. explicit provider + requires
+    3. explicit provider default
+    4. routing_policy ordered selection
+    5. alias 'default'
+    6. any enabled model matching requires
     """
 
     def __init__(self, registry: ModelRegistry) -> None:
@@ -43,6 +46,10 @@ class ModelSelector:
         if request.provider:
             return self._registry.get_default(request.provider)
 
+        selected = self._select_by_routing_policy(request)
+        if selected is not None:
+            return selected
+
         try:
             return self._registry.resolve_config("default")
         except ModelRegistryError:
@@ -52,3 +59,30 @@ class ModelSelector:
                     requires=set(request.requires),
                 )
             raise
+
+    def _select_by_routing_policy(self, request: ModelSelectionInput) -> Optional[ModelConfig]:
+        policy = get_routing_policy(request.routing_policy)
+
+        for provider in policy.provider_order:
+            models = self._registry.list_models(
+                filter_by=RegistryFilter(
+                    provider=provider,
+                    requires=request.requires,
+                    enabled_only=True,
+                )
+            )
+            if models:
+                return models[0]
+
+        if policy.fallback_to_any:
+            models = self._registry.list_models(
+                filter_by=RegistryFilter(
+                    provider=None,
+                    requires=request.requires,
+                    enabled_only=True,
+                )
+            )
+            if models:
+                return models[0]
+
+        return None
