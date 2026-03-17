@@ -1,0 +1,25 @@
+name: "echo"
+version: "0.1.0"
+description: "Echo input back through the runtime."
+use_cases:
+  - "echo"
+  - "debug"
+triggers:
+  - "echo"
+  - "debug"
+capabilities:
+  filesystem_read: false
+  filesystem_write: false
+  network: false
+  shell: false
+  secrets: false
+inputs:
+  text:
+    type: "string"
+outputs:
+  result:
+    type: "object"
+execution:
+  type: "tool"
+tools:
+  - name: "echo"

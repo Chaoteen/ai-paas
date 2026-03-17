@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from data_plane.event_envelope import EventEnvelope
 from data_plane.redis_stream_bus import RedisStreamBus
-
 
 CONTROL_EVENTS_STREAM = "control.events"
 
@@ -58,7 +58,6 @@ class ControlBus:
             return await self.repository.append(event)
         if hasattr(self.repository, "record"):
             return await self.repository.record(event)
-
         raise AttributeError(
             f"{self.repository.__class__.__name__} does not support save/create/add/append/record"
         )
@@ -76,8 +75,23 @@ class ControlBus:
             return await self.repository.get_events(event_type=event_type, limit=limit)
         if hasattr(self.repository, "query"):
             return await self.repository.query(event_type=event_type, limit=limit)
-
         return []
+
+    async def _publish_to_event_bus(self, envelope: EventEnvelope) -> None:
+        if self.event_bus is None:
+            return
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self.event_bus.publish, envelope),
+                timeout=2.0,
+            )
+        except Exception as exc:
+            # 控制面事件流是增强能力，不应阻塞主事务
+            print(
+                f"[control_bus] warning: event_bus publish failed for "
+                f"{envelope.event_type} event_id={envelope.id}: {exc}"
+            )
 
     async def publish(
         self,
@@ -89,7 +103,6 @@ class ControlBus:
         **kwargs: Any,
     ) -> Dict[str, Any]:
         final_payload: Dict[str, Any] = {}
-
         if payload:
             final_payload.update(payload)
 
@@ -98,16 +111,24 @@ class ControlBus:
             if key not in reserved_keys:
                 final_payload[key] = value
 
-        # 关键修复：把 agent_id 提升为顶层字段，供 Postgres repository 落列
         agent_id = None
         if "agent_id" in kwargs:
             agent_id = kwargs.get("agent_id")
         elif "agent_id" in final_payload:
             agent_id = final_payload.get("agent_id")
 
+        envelope = EventEnvelope.new(
+            event_type=event_type,
+            stream=CONTROL_EVENTS_STREAM,
+            source=source,
+            payload=final_payload,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+
         event = {
-            "event_id": None,
-            "id": None,  # 某些 repository 直接用 id
+            "event_id": envelope.id,
+            "id": envelope.id,
             "event_type": event_type,
             "stream": CONTROL_EVENTS_STREAM,
             "source": source,
@@ -119,20 +140,12 @@ class ControlBus:
             "schema_version": "1.0",
         }
 
-        if self.event_bus is not None:
-            envelope = EventEnvelope.new(
-                event_type=event_type,
-                stream=CONTROL_EVENTS_STREAM,
-                source=source,
-                payload=final_payload,
-                tenant_id=tenant_id,
-                correlation_id=correlation_id,
-            )
-            self.event_bus.publish(envelope)
-            event["event_id"] = envelope.event_id
-            event["id"] = envelope.event_id
-
+        # 先保存 control event，自身查询接口必须可见
         saved = await self._repo_save(event)
+
+        # 再 best-effort 发布到 Redis，不阻塞主响应
+        await self._publish_to_event_bus(envelope)
+
         return saved
 
     async def agent_registered(

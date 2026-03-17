@@ -1,66 +1,29 @@
-from control_plane.control_bus import ControlBus, CONTROL_EVENTS_STREAM
-from data_plane.redis_stream_bus import RedisStreamBus
+import asyncio
+import pytest
+
+from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 
 
-class FakeRedis:
-    def __init__(self):
-        self.streams = {}
-        self.groups = {}
-        self.seq = 0
-
-    def ping(self):
-        return True
-
-    def xadd(self, stream, fields, maxlen=None, approximate=True):
-        self.seq += 1
-        msg_id = f"1-{self.seq}"
-        self.streams.setdefault(stream, []).append((msg_id, fields))
-        return msg_id
-
-    def xgroup_create(self, stream, group_name, id="0", mkstream=True):
-        self.groups.setdefault(stream, {})[group_name] = {"last_id": id}
-
-    def xreadgroup(self, group_name, consumer_name, streams, count=10, block=1000):
-        result = []
-        for stream, _cursor in streams.items():
-            msgs = self.streams.get(stream, [])[:count]
-            if msgs:
-                result.append((stream, msgs))
-        return result
-
-    def xack(self, stream, group_name, message_id):
-        return 1
+class HangingEventBus:
+    def publish(self, envelope):
+        import time
+        time.sleep(10)
 
 
-def test_control_bus_agent_registered():
-    bus = RedisStreamBus(FakeRedis())
-    control_bus = ControlBus(bus)
+@pytest.mark.asyncio
+async def test_control_bus_publish_does_not_block_when_event_bus_hangs():
+    repo = InMemoryControlEventRepository()
+    bus = ControlBus(repository=repo, event_bus=HangingEventBus())
 
-    envelope = control_bus.agent_registered(
-        agent_id="agent-123",
-        agent_name="summary-agent",
-        tenant_id="tenant-1",
-        metadata={"version": "v1"},
+    result = await bus.publish(
+        event_type="agent.registered",
+        tenant_id="tenant-a",
+        agent_id="agent-001",
+        payload={"name": "agent-001"},
     )
 
-    assert envelope.stream == CONTROL_EVENTS_STREAM
-    assert envelope.event_type == "agent_registered"
-    assert envelope.payload["agent_id"] == "agent-123"
-    assert envelope.payload["agent_name"] == "summary-agent"
-    assert envelope.payload["metadata"]["version"] == "v1"
+    assert result["event_type"] == "agent.registered"
 
-
-def test_control_bus_status_changed():
-    bus = RedisStreamBus(FakeRedis())
-    control_bus = ControlBus(bus)
-
-    envelope = control_bus.agent_status_changed(
-        agent_id="agent-123",
-        from_status="idle",
-        to_status="running",
-        tenant_id="tenant-1",
-    )
-
-    assert envelope.event_type == "agent_status_changed"
-    assert envelope.payload["from_status"] == "idle"
-    assert envelope.payload["to_status"] == "running"
+    items = await bus.list_events(limit=10)
+    assert len(items) == 1
+    assert items[0]["event_type"] == "agent.registered"

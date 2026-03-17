@@ -11,12 +11,10 @@ from data_plane.redis_stream_bus import RedisStreamBus
 def _parse_dt(value: Any) -> datetime:
     if value is None:
         return datetime.min.replace(tzinfo=timezone.utc)
-
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
-
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if dt.tzinfo is None:
@@ -44,11 +42,16 @@ class RouterWorker:
         self._running = False
 
     async def start(self) -> None:
-        self.event_bus.ensure_group(DATA_EVENTS_STREAM, self.consumer_group)
+        await asyncio.to_thread(
+            self.event_bus.ensure_group,
+            DATA_EVENTS_STREAM,
+            self.consumer_group,
+        )
         self._running = True
 
         while self._running:
-            messages = self.event_bus.consume(
+            messages = await asyncio.to_thread(
+                self.event_bus.consume,
                 stream=DATA_EVENTS_STREAM,
                 group_name=self.consumer_group,
                 consumer_name=self.consumer_name,
@@ -63,14 +66,25 @@ class RouterWorker:
             for msg in messages:
                 try:
                     await self._handle_envelope(msg.envelope)
-                    self.event_bus.ack(msg.stream, self.consumer_group, msg.message_id)
+                    await asyncio.to_thread(
+                        self.event_bus.ack,
+                        msg.stream,
+                        self.consumer_group,
+                        msg.message_id,
+                    )
                 except Exception as exc:
-                    self.event_bus.dead_letter(
+                    await asyncio.to_thread(
+                        self.event_bus.dead_letter,
                         original_stream=msg.stream,
                         envelope=msg.envelope,
                         reason=str(exc),
                     )
-                    self.event_bus.ack(msg.stream, self.consumer_group, msg.message_id)
+                    await asyncio.to_thread(
+                        self.event_bus.ack,
+                        msg.stream,
+                        self.consumer_group,
+                        msg.message_id,
+                    )
 
     async def stop(self) -> None:
         self._running = False

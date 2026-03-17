@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from data_plane.event_envelope import EventEnvelope
 from data_plane.redis_stream_bus import RedisStreamBus
-
 
 DATA_EVENTS_STREAM = "data.events"
 
@@ -53,7 +53,6 @@ class DataBus:
             return await self.repository.append(event)
         if hasattr(self.repository, "record"):
             return await self.repository.record(event)
-
         raise AttributeError(
             f"{self.repository.__class__.__name__} does not support save/create/add/append/record"
         )
@@ -72,6 +71,11 @@ class DataBus:
         if hasattr(self.repository, "query"):
             return await self.repository.query(event_type=event_type, limit=limit)
         return []
+
+    async def _publish_to_event_bus(self, envelope: EventEnvelope) -> None:
+        if self.event_bus is None:
+            return
+        await asyncio.to_thread(self.event_bus.publish, envelope)
 
     async def publish(
         self,
@@ -116,10 +120,7 @@ class DataBus:
 
         event = envelope.to_dict()
         saved = await self._repo_save(event)
-
-        if self.event_bus is not None:
-            self.event_bus.publish(envelope)
-
+        await self._publish_to_event_bus(envelope)
         return saved
 
     async def router_success(
@@ -138,7 +139,6 @@ class DataBus:
         }
         if extra:
             payload["extra"] = extra
-
         return await self.publish(
             event_type="router.success",
             task_id=task_id,
@@ -164,7 +164,6 @@ class DataBus:
         }
         if extra:
             payload["extra"] = extra
-
         return await self.publish(
             event_type="router.failed",
             task_id=task_id,
@@ -189,7 +188,6 @@ class DataBus:
             payload["route_to"] = route_to
         if extra:
             payload["extra"] = extra
-
         return await self.publish(
             event_type="task.executing",
             task_id=task_id,
@@ -214,7 +212,6 @@ class DataBus:
             payload["result"] = result
         if extra:
             payload["extra"] = extra
-
         return await self.publish(
             event_type="task.completed",
             task_id=task_id,
@@ -240,7 +237,6 @@ class DataBus:
         }
         if extra:
             payload["extra"] = extra
-
         return await self.publish(
             event_type="task.failed",
             task_id=task_id,

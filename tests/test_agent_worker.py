@@ -1,6 +1,12 @@
 import pytest
 
 from data_plane.agent_worker import AgentWorker
+from runtime.agent_runtime import AgentRuntime
+from runtime.llm_adapter import NoopLLMAdapter
+from runtime.policy_engine import PolicyEngine
+from runtime.skill_registry import SkillRegistry
+from runtime.skill_resolver import SkillResolver
+from runtime.tool_executor import ToolExecutor
 
 
 class FakeAgentRegistry:
@@ -18,6 +24,7 @@ class FakeDataBus:
         self.executing_events = []
         self.completed_events = []
         self.failed_events = []
+        self.published_events = []
 
     async def task_executing(self, **kwargs):
         self.executing_events.append(kwargs)
@@ -30,6 +37,29 @@ class FakeDataBus:
     async def task_failed(self, **kwargs):
         self.failed_events.append(kwargs)
         return kwargs
+
+    async def publish(
+        self,
+        *,
+        event_type,
+        payload,
+        source,
+        tenant_id,
+        correlation_id=None,
+        task_id=None,
+        workflow_id=None,
+    ):
+        event = {
+            "event_type": event_type,
+            "payload": payload,
+            "source": source,
+            "tenant_id": tenant_id,
+            "correlation_id": correlation_id,
+            "task_id": task_id,
+            "workflow_id": workflow_id,
+        }
+        self.published_events.append(event)
+        return event
 
 
 class FakeEnvelope:
@@ -56,8 +86,26 @@ class FakeEventBus:
         return "1-0"
 
 
+def build_runtime(data_bus):
+    registry = SkillRegistry(
+        bundled_dir="skills/bundled",
+        local_dir=None,
+        workspace_dir=None,
+    )
+    resolver = SkillResolver(registry)
+    policy_engine = PolicyEngine()
+    return AgentRuntime(
+        registry=registry,
+        resolver=resolver,
+        policy_engine=policy_engine,
+        llm_adapter=NoopLLMAdapter(),
+        tool_executor=ToolExecutor(),
+        data_bus=data_bus,
+    )
+
+
 @pytest.mark.asyncio
-async def test_agent_worker_completed():
+async def test_agent_worker_completed_with_agent_runtime():
     registry = FakeAgentRegistry(
         [
             {
@@ -65,14 +113,18 @@ async def test_agent_worker_completed():
                 "name": "translator-agent",
                 "tenant_id": "tenant_a",
                 "status": "healthy",
+                "metadata": {},
             }
         ]
     )
     data_bus = FakeDataBus()
+    runtime = build_runtime(data_bus)
+
     worker = AgentWorker(
         agent_registry=registry,
         data_bus=data_bus,
         event_bus=FakeEventBus(),
+        agent_runtime=runtime,
     )
 
     envelope = FakeEnvelope(
@@ -86,7 +138,7 @@ async def test_agent_worker_completed():
             "extra": {
                 "selected_agent_id": "agent_translation_001",
                 "selected_agent_name": "translator-agent",
-                "required_capability": "translation",
+                "required_capability": "echo",
                 "input": {"text": "hello"},
                 "metadata": {},
             },
@@ -98,18 +150,31 @@ async def test_agent_worker_completed():
     assert len(data_bus.executing_events) == 1
     assert len(data_bus.completed_events) == 1
     assert len(data_bus.failed_events) == 0
-    assert data_bus.completed_events[0]["task_id"] == "task_100"
-    assert data_bus.completed_events[0]["result"]["agent_id"] == "agent_translation_001"
+
+    completed = data_bus.completed_events[0]
+    assert completed["task_id"] == "task_100"
+    assert completed["result"]["execution_mode"] == "runtime"
+    assert completed["result"]["agent_id"] == "agent_translation_001"
+    assert completed["result"]["runtime"]["skill_name"] == "echo"
+    assert completed["result"]["output"]["mode"] == "tool"
+
+    event_types = [e["event_type"] for e in data_bus.published_events]
+    assert "skill.selected" in event_types
+    assert "tool.invoking" in event_types
+    assert "tool.completed" in event_types
 
 
 @pytest.mark.asyncio
 async def test_agent_worker_failed_when_agent_not_found():
     registry = FakeAgentRegistry([])
     data_bus = FakeDataBus()
+    runtime = build_runtime(data_bus)
+
     worker = AgentWorker(
         agent_registry=registry,
         data_bus=data_bus,
         event_bus=FakeEventBus(),
+        agent_runtime=runtime,
     )
 
     envelope = FakeEnvelope(
@@ -123,7 +188,7 @@ async def test_agent_worker_failed_when_agent_not_found():
             "extra": {
                 "selected_agent_id": "missing-agent",
                 "selected_agent_name": "missing-agent",
-                "required_capability": "translation",
+                "required_capability": "echo",
                 "input": {"text": "hello"},
                 "metadata": {},
             },
@@ -136,3 +201,96 @@ async def test_agent_worker_failed_when_agent_not_found():
     assert len(data_bus.completed_events) == 0
     assert len(data_bus.failed_events) == 1
     assert data_bus.failed_events[0]["error"] == "AGENT_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_failed_when_runtime_denied(tmp_path):
+    skill_root = tmp_path / "bundled" / "net-skill"
+    skill_root.mkdir(parents=True)
+
+    (skill_root / "skill.yaml").write_text(
+        """
+name: "net-skill"
+version: "0.1.0"
+description: "Skill requiring network"
+use_cases:
+  - "network_test"
+triggers:
+  - "network_test"
+capabilities:
+  network: true
+  shell: false
+  filesystem_read: false
+  filesystem_write: false
+  secrets: false
+execution:
+  type: "tool"
+tools:
+  - name: "echo"
+""".strip(),
+        encoding="utf-8",
+    )
+    (skill_root / "SKILL.md").write_text("# net-skill", encoding="utf-8")
+
+    registry = FakeAgentRegistry(
+        [
+            {
+                "id": "agent_network_001",
+                "name": "network-agent",
+                "tenant_id": "tenant_a",
+                "status": "healthy",
+                "metadata": {},
+            }
+        ]
+    )
+    data_bus = FakeDataBus()
+
+    runtime_registry = SkillRegistry(
+        bundled_dir=str(tmp_path / "bundled"),
+        local_dir=None,
+        workspace_dir=None,
+    )
+    runtime = AgentRuntime(
+        registry=runtime_registry,
+        resolver=SkillResolver(runtime_registry),
+        policy_engine=PolicyEngine(),
+        llm_adapter=NoopLLMAdapter(),
+        tool_executor=ToolExecutor(),
+        data_bus=data_bus,
+    )
+
+    worker = AgentWorker(
+        agent_registry=registry,
+        data_bus=data_bus,
+        event_bus=FakeEventBus(),
+        agent_runtime=runtime,
+    )
+
+    envelope = FakeEnvelope(
+        task_id="task_102",
+        workflow_id="wf_102",
+        tenant_id="tenant_a",
+        correlation_id="corr_102",
+        payload={
+            "task_id": "task_102",
+            "route_to": "agent_network_001",
+            "extra": {
+                "selected_agent_id": "agent_network_001",
+                "selected_agent_name": "network-agent",
+                "required_capability": "network_test",
+                "input": {"text": "hello"},
+                "metadata": {},
+            },
+        },
+    )
+
+    await worker._handle_envelope(envelope)
+
+    assert len(data_bus.executing_events) == 1
+    assert len(data_bus.completed_events) == 0
+    assert len(data_bus.failed_events) == 1
+    assert "unauthorized capabilities" in data_bus.failed_events[0]["error"]
+
+    event_types = [e["event_type"] for e in data_bus.published_events]
+    assert "skill.selected" in event_types
+    assert "security.denied" in event_types

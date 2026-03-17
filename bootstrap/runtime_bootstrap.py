@@ -13,6 +13,12 @@ from control_plane.agent_registry import AgentRegistry
 from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 from data_plane.data_bus import DataBus, InMemoryDataEventRepository
 from data_plane.redis_stream_bus import RedisStreamBus
+from runtime.agent_runtime import AgentRuntime
+from runtime.llm_adapter import NoopLLMAdapter
+from runtime.policy_engine import PolicyEngine
+from runtime.skill_registry import SkillRegistry
+from runtime.skill_resolver import SkillResolver
+from runtime.tool_executor import ToolExecutor
 
 
 def _normalize_database_url(url: str) -> str:
@@ -129,7 +135,6 @@ def _instantiate_repository(repo_cls: Any, db: RuntimeDB) -> Any:
         return repo_cls()
 
     kwargs: Dict[str, Any] = {}
-
     if "db" in params:
         kwargs["db"] = db
     if "session_factory" in params:
@@ -153,7 +158,6 @@ def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegis
     params = list(sig.parameters.keys())[1:]
 
     kwargs: Dict[str, Any] = {}
-
     if "agent_repository" in params:
         kwargs["agent_repository"] = agent_repository
     elif "repository" in params:
@@ -169,17 +173,52 @@ def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegis
 
     if len(params) >= 2:
         return AgentRegistry(agent_repository, control_bus)
-
     if len(params) == 1:
         return AgentRegistry(agent_repository)
 
     return AgentRegistry()
 
 
+def _split_extra_skill_dirs(value: str | None) -> list[str]:
+    if not value:
+        return []
+    items = [x.strip() for x in value.split(os.pathsep)]
+    return [x for x in items if x]
+
+
+def _build_agent_runtime(data_bus: DataBus) -> AgentRuntime:
+    bundled_dir = os.getenv("AI_PAAS_BUNDLED_SKILLS_DIR", "skills/bundled")
+    local_dir = os.getenv("AI_PAAS_LOCAL_SKILLS_DIR", os.path.expanduser("~/.ai-paas/skills"))
+    workspace_dir = os.getenv("AI_PAAS_WORKSPACE_SKILLS_DIR")
+    extra_dirs = _split_extra_skill_dirs(os.getenv("AI_PAAS_EXTRA_SKILL_DIRS"))
+
+    registry = SkillRegistry(
+        bundled_dir=bundled_dir,
+        local_dir=local_dir,
+        workspace_dir=workspace_dir,
+        extra_dirs=extra_dirs,
+    )
+    resolver = SkillResolver(registry)
+    policy_engine = PolicyEngine()
+    llm_adapter = NoopLLMAdapter()
+    tool_executor = ToolExecutor()
+
+    return AgentRuntime(
+        registry=registry,
+        resolver=resolver,
+        policy_engine=policy_engine,
+        llm_adapter=llm_adapter,
+        tool_executor=tool_executor,
+        data_bus=data_bus,
+    )
+
+
 def _build_router_worker_if_possible(agent_registry: Any, data_bus: DataBus, event_bus: RedisStreamBus | None):
     if event_bus is None:
         return None
+
     from data_plane.router_worker import RouterWorker
+
     return RouterWorker(
         agent_registry=agent_registry,
         data_bus=data_bus,
@@ -189,14 +228,22 @@ def _build_router_worker_if_possible(agent_registry: Any, data_bus: DataBus, eve
     )
 
 
-def _build_agent_worker_if_possible(agent_registry: Any, data_bus: DataBus, event_bus: RedisStreamBus | None):
+def _build_agent_worker_if_possible(
+    agent_registry: Any,
+    data_bus: DataBus,
+    event_bus: RedisStreamBus | None,
+    agent_runtime: AgentRuntime,
+):
     if event_bus is None:
         return None
+
     from data_plane.agent_worker import AgentWorker
+
     return AgentWorker(
         agent_registry=agent_registry,
         data_bus=data_bus,
         event_bus=event_bus,
+        agent_runtime=agent_runtime,
         consumer_group="agent-workers",
         consumer_name=os.getenv("AI_PAAS_AGENT_CONSUMER", "agent-1"),
     )
@@ -217,8 +264,9 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
+    agent_runtime = _build_agent_runtime(data_bus)
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
-    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus)
+    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus, agent_runtime)
 
     return {
         "mode": "memory",
@@ -226,6 +274,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         "agent_registry": agent_registry,
         "control_bus": control_bus,
         "data_bus": data_bus,
+        "agent_runtime": agent_runtime,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }
@@ -251,8 +300,9 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
+    agent_runtime = _build_agent_runtime(data_bus)
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
-    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus)
+    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus, agent_runtime)
 
     return {
         "mode": "postgres",
@@ -260,6 +310,7 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         "agent_registry": agent_registry,
         "control_bus": control_bus,
         "data_bus": data_bus,
+        "agent_runtime": agent_runtime,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }
@@ -267,8 +318,6 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
 
 async def build_runtime_state() -> Dict[str, Any]:
     mode = _get_persistence_mode()
-
     if mode == "postgres":
         return await _build_postgres_runtime_state()
-
     return await _build_memory_runtime_state()
