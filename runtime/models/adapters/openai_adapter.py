@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import requests
 
@@ -46,8 +44,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.validate_request(request)
-
-        start = time.perf_counter()
         payload = self._build_payload(request)
 
         headers = {
@@ -87,8 +83,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             )
 
         body = response.json()
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return self._parse_response(body=body, latency_ms=latency_ms)
+        return self._parse_response(body=body)
 
     def health_check(self) -> HealthStatus:
         return HealthStatus(
@@ -156,7 +151,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             },
         }
 
-    def _parse_response(self, body: Dict[str, Any], latency_ms: int) -> ModelResponse:
+    def _parse_response(self, body: Dict[str, Any]) -> ModelResponse:
         choices: List[Dict[str, Any]] = body.get("choices") or []
         if not choices:
             raise ModelProviderError("provider returned no choices")
@@ -203,8 +198,7 @@ class OpenAICompatibleAdapter(LLMAdapter):
             finish_reason=first.get("finish_reason"),
             usage=usage,
             raw_response=body,
-            latency_ms=latency_ms,
-            request_id=body.get("id"),
+            latency_ms=None,
         )
 
 

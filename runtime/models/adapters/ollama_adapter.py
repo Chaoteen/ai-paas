@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import time
 from typing import Any, Dict, List
 
 import requests
@@ -52,7 +50,6 @@ class OllamaAdapter(LLMAdapter):
                 f"ollama model '{self.config.model_name}' does not support tools"
             )
 
-        start = time.perf_counter()
         payload = self._build_payload(request)
 
         headers = {
@@ -80,8 +77,7 @@ class OllamaAdapter(LLMAdapter):
             )
 
         body = response.json()
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return self._parse_response(body=body, latency_ms=latency_ms)
+        return self._parse_response(body=body)
 
     def health_check(self) -> HealthStatus:
         return HealthStatus(
@@ -149,7 +145,7 @@ class OllamaAdapter(LLMAdapter):
             },
         }
 
-    def _parse_response(self, body: Dict[str, Any], latency_ms: int) -> ModelResponse:
+    def _parse_response(self, body: Dict[str, Any]) -> ModelResponse:
         choices: List[Dict[str, Any]] = body.get("choices") or []
         if not choices:
             raise ModelProviderError("ollama returned no choices")
@@ -196,6 +192,5 @@ class OllamaAdapter(LLMAdapter):
             finish_reason=first.get("finish_reason"),
             usage=usage,
             raw_response=body,
-            latency_ms=latency_ms,
-            request_id=body.get("id"),
+            latency_ms=None,
         )

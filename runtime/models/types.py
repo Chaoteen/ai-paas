@@ -78,6 +78,18 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class ModelRequest:
+    """
+    ModelRequest only describes provider-facing inference parameters.
+
+    Runtime context such as:
+    - tenant_id
+    - task_id
+    - workflow_id
+    - correlation_id
+    - user_id
+
+    must come from ExecutionContext, not from this object.
+    """
     messages: List[ChatMessage]
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -87,11 +99,6 @@ class ModelRequest:
     response_format: Optional[Dict[str, Any]] = None
     stream: bool = False
     extra_params: Dict[str, Any] = field(default_factory=dict)
-    request_id: Optional[str] = None
-    tenant_id: Optional[str] = None
-    user_id: Optional[str] = None
-    workflow_id: Optional[str] = None
-    task_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -111,7 +118,6 @@ class ModelResponse:
     usage: UsageInfo = field(default_factory=UsageInfo)
     raw_response: Optional[Dict[str, Any]] = None
     latency_ms: Optional[int] = None
-    request_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
