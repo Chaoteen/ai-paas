@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import os
 
+from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
+from data_plane.data_bus import DataBus, InMemoryDataEventRepository
 from data_plane.redis_stream_bus import RedisStreamBus
-from control_plane.control_bus import ControlBus
-from data_plane.data_bus import DataBus
 
 
 def build_event_bus() -> RedisStreamBus:
@@ -21,9 +21,9 @@ def build_event_bus() -> RedisStreamBus:
 
 def build_control_bus() -> ControlBus:
     event_bus = build_event_bus()
-    return ControlBus(event_bus)
+    return ControlBus(repository=InMemoryControlEventRepository(), event_bus=event_bus)
 
 
 def build_data_bus() -> DataBus:
     event_bus = build_event_bus()
-    return DataBus(event_bus)
+    return DataBus(repository=InMemoryDataEventRepository(), event_bus=event_bus)

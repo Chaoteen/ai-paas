@@ -21,15 +21,6 @@ class ConsumedMessage:
 
 
 class RedisStreamBus:
-    """
-    生产级基础事件总线：
-    - Redis Streams
-    - control.events / data.events
-    - consumer group
-    - ack
-    - dead-letter stream
-    """
-
     def __init__(
         self,
         redis_client: Any,
@@ -50,14 +41,13 @@ class RedisStreamBus:
         port = int(os.getenv("AI_PAAS_REDIS_PORT", "6379"))
         db = int(os.getenv("AI_PAAS_REDIS_DB", "0"))
         password = os.getenv("AI_PAAS_REDIS_PASSWORD")
-        decode_responses = True
 
         client = redis.Redis(
             host=host,
             port=port,
             db=db,
             password=password,
-            decode_responses=decode_responses,
+            decode_responses=True,
         )
         client.ping()
         return cls(client)
@@ -81,6 +71,8 @@ class RedisStreamBus:
         payload: Dict[str, Any],
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         headers: Optional[Dict[str, Any]] = None,
         schema_version: str = "1.0",
     ) -> EventEnvelope:
@@ -91,6 +83,8 @@ class RedisStreamBus:
             payload=payload,
             tenant_id=tenant_id,
             correlation_id=correlation_id,
+            task_id=task_id,
+            workflow_id=workflow_id,
             headers=headers,
             schema_version=schema_version,
         )
@@ -101,7 +95,6 @@ class RedisStreamBus:
         try:
             self.redis.xgroup_create(stream, group_name, id=start_id, mkstream=True)
         except Exception as exc:
-            # Redis group already exists: tolerate BUSYGROUP
             if "BUSYGROUP" not in str(exc):
                 raise
 
@@ -162,6 +155,8 @@ class RedisStreamBus:
             payload=dlq_payload,
             tenant_id=envelope.tenant_id,
             correlation_id=envelope.correlation_id,
+            task_id=envelope.task_id,
+            workflow_id=envelope.workflow_id,
             headers={"dead_letter": True},
         )
         return self.publish(dlq_envelope)

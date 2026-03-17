@@ -1,66 +1,75 @@
-from data_plane.data_bus import DataBus, DATA_EVENTS_STREAM
-from data_plane.redis_stream_bus import RedisStreamBus
+import pytest
+
+from data_plane.data_bus import DataBus
 
 
-class FakeRedis:
+class FakeRepo:
     def __init__(self):
-        self.streams = {}
-        self.groups = {}
-        self.seq = 0
+        self.items = []
 
-    def ping(self):
-        return True
+    async def save(self, event):
+        self.items.append(event)
+        return event
 
-    def xadd(self, stream, fields, maxlen=None, approximate=True):
-        self.seq += 1
-        msg_id = f"1-{self.seq}"
-        self.streams.setdefault(stream, []).append((msg_id, fields))
-        return msg_id
-
-    def xgroup_create(self, stream, group_name, id="0", mkstream=True):
-        self.groups.setdefault(stream, {})[group_name] = {"last_id": id}
-
-    def xreadgroup(self, group_name, consumer_name, streams, count=10, block=1000):
-        result = []
-        for stream, _cursor in streams.items():
-            msgs = self.streams.get(stream, [])[:count]
-            if msgs:
-                result.append((stream, msgs))
-        return result
-
-    def xack(self, stream, group_name, message_id):
-        return 1
+    async def list_events(self, event_type=None, limit=100):
+        data = self.items
+        if event_type:
+            data = [x for x in data if x.get("event_type") == event_type]
+        return list(data[-limit:])[::-1]
 
 
-def test_data_bus_router_success():
-    bus = RedisStreamBus(FakeRedis())
-    data_bus = DataBus(bus)
+class FakeEventBus:
+    def __init__(self):
+        self.published = []
 
-    envelope = data_bus.router_success(
-        task_id="task-1",
-        route_to="analysis",
-        tenant_id="tenant-a",
-        correlation_id="corr-1",
-        extra={"confidence": 0.98},
+    def publish(self, envelope):
+        self.published.append(envelope)
+        return "1-0"
+
+    def ensure_group(self, stream, group_name):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_publish_with_task_and_workflow():
+    repo = FakeRepo()
+    event_bus = FakeEventBus()
+    bus = DataBus(repository=repo, event_bus=event_bus)
+
+    event = await bus.publish(
+        event_type="task.submitted",
+        payload={"required_capability": "translation"},
+        source="runtime.api",
+        tenant_id="tenant_a",
+        correlation_id="corr_001",
+        task_id="task_001",
+        workflow_id="wf_001",
     )
 
-    assert envelope.stream == DATA_EVENTS_STREAM
-    assert envelope.event_type == "router.success"
-    assert envelope.payload["task_id"] == "task-1"
-    assert envelope.payload["route_to"] == "analysis"
-    assert envelope.payload["extra"]["confidence"] == 0.98
+    assert event["event_type"] == "task.submitted"
+    assert event["task_id"] == "task_001"
+    assert event["workflow_id"] == "wf_001"
+    assert event["tenant_id"] == "tenant_a"
+    assert event["correlation_id"] == "corr_001"
+    assert "id" in event
+    assert len(repo.items) == 1
+    assert len(event_bus.published) == 1
 
 
-def test_data_bus_router_failed():
-    bus = RedisStreamBus(FakeRedis())
-    data_bus = DataBus(bus)
+@pytest.mark.asyncio
+async def test_router_success():
+    repo = FakeRepo()
+    bus = DataBus(repository=repo, event_bus=None)
 
-    envelope = data_bus.router_failed(
-        task_id="task-2",
-        error="no_route_found",
-        tenant_id="tenant-a",
+    event = await bus.router_success(
+        task_id="task_001",
+        workflow_id="wf_001",
+        route_to="agent_001",
+        tenant_id="tenant_a",
+        correlation_id="corr_001",
     )
 
-    assert envelope.event_type == "router.failed"
-    assert envelope.payload["task_id"] == "task-2"
-    assert envelope.payload["error"] == "no_route_found"
+    assert event["event_type"] == "router.success"
+    assert event["task_id"] == "task_001"
+    assert event["workflow_id"] == "wf_001"
+    assert event["payload"]["route_to"] == "agent_001"

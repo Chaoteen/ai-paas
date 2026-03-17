@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import inspect
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -12,7 +13,7 @@ from control_plane.agent_registry import AgentRegistry
 from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 from data_plane.data_bus import DataBus, InMemoryDataEventRepository
 from data_plane.redis_stream_bus import RedisStreamBus
-from contextlib import asynccontextmanager
+
 
 def _normalize_database_url(url: str) -> str:
     if url.startswith("postgresql://"):
@@ -53,8 +54,10 @@ class InMemoryAgentRepository:
 
     async def save(self, agent: Dict[str, Any]) -> Dict[str, Any]:
         data = dict(agent)
-        data.setdefault("created_at", _utc_now_iso())
-        data.setdefault("updated_at", _utc_now_iso())
+        now = _utc_now_iso()
+        data.setdefault("created_at", now)
+        data.setdefault("updated_at", now)
+        data.setdefault("heartbeat_at", now)
         self.items[data["id"]] = data
         return data
 
@@ -85,8 +88,10 @@ class InMemoryAgentRepository:
         item = self.items.get(agent_id)
         if not item:
             return False
-        item["last_heartbeat_at"] = _utc_now_iso()
-        item["updated_at"] = _utc_now_iso()
+        now = _utc_now_iso()
+        item["heartbeat_at"] = now
+        item["last_heartbeat_at"] = now
+        item["updated_at"] = now
         return True
 
 
@@ -117,16 +122,8 @@ def _build_runtime_db() -> RuntimeDB:
 
 
 def _instantiate_repository(repo_cls: Any, db: RuntimeDB) -> Any:
-    """
-    兼容不同 repository 构造签名：
-    - Repo(db)
-    - Repo(session_factory=...)
-    - Repo(session_maker=...)
-    - Repo(engine=...)
-    - Repo()
-    """
     sig = inspect.signature(repo_cls.__init__)
-    params = list(sig.parameters.keys())[1:]  # skip self
+    params = list(sig.parameters.keys())[1:]
 
     if not params:
         return repo_cls()
@@ -153,7 +150,7 @@ def _instantiate_repository(repo_cls: Any, db: RuntimeDB) -> Any:
 
 def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegistry:
     sig = inspect.signature(AgentRegistry.__init__)
-    params = list(sig.parameters.keys())[1:]  # skip self
+    params = list(sig.parameters.keys())[1:]
 
     kwargs: Dict[str, Any] = {}
 
@@ -179,6 +176,19 @@ def _build_agent_registry(agent_repository: Any, control_bus: Any) -> AgentRegis
     return AgentRegistry()
 
 
+def _build_router_worker_if_possible(agent_registry: Any, data_bus: DataBus, event_bus: RedisStreamBus | None):
+    if event_bus is None:
+        return None
+    from data_plane.router_worker import RouterWorker
+    return RouterWorker(
+        agent_registry=agent_registry,
+        data_bus=data_bus,
+        event_bus=event_bus,
+        consumer_group="router-workers",
+        consumer_name=os.getenv("AI_PAAS_ROUTER_CONSUMER", "router-1"),
+    )
+
+
 async def _build_memory_runtime_state() -> Dict[str, Any]:
     event_bus = _build_event_bus_if_needed()
 
@@ -194,6 +204,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
+    router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
 
     return {
         "mode": "memory",
@@ -201,6 +212,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         "agent_registry": agent_registry,
         "control_bus": control_bus,
         "data_bus": data_bus,
+        "router_worker": router_worker,
     }
 
 
@@ -224,6 +236,7 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         data_bus.ensure_consumer_group("data-plane-workers")
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
+    router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
 
     return {
         "mode": "postgres",
@@ -231,6 +244,7 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         "agent_registry": agent_registry,
         "control_bus": control_bus,
         "data_bus": data_bus,
+        "router_worker": router_worker,
     }
 
 

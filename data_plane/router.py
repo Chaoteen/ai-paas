@@ -11,18 +11,11 @@ from data_plane.handlers.agent_handler import AgentHandler
 from data_plane.handlers.model_handler import ModelHandler
 from data_plane.handlers.promptflow_handler import PromptflowHandler
 from data_plane.data_bus import DataBus
-from data_plane.data_events import DataEvent
 
 logger = logging.getLogger(__name__)
 
 
 class DataPlaneRouter:
-    """
-    第五轮版本：
-    - 根据 target_type 分发
-    - 发布 Data Bus 事件
-    """
-
     def __init__(
         self,
         *,
@@ -46,18 +39,16 @@ class DataPlaneRouter:
     ) -> ExecutionResult:
         task_id = self._build_task_id(envelope)
 
-        self.data_bus.publish(
-            DataEvent.new(
-                event_type="task.created",
-                task_id=task_id,
-                envelope_id=envelope.envelope_id,
-                payload={
-                    "request_id": envelope.request_id,
-                    "tenant_id": envelope.tenant_id,
-                    "target_type": envelope.target_type,
-                    "target": envelope.target,
-                },
-            )
+        await self.data_bus.publish(
+            event_type="task.created",
+            task_id=task_id,
+            payload={
+                "request_id": envelope.request_id,
+                "tenant_id": envelope.tenant_id,
+                "target_type": envelope.target_type,
+                "target": envelope.target,
+                "envelope_id": envelope.envelope_id,
+            },
         )
 
         try:
@@ -75,16 +66,14 @@ class DataPlaneRouter:
                         "target_type": envelope.target_type,
                     },
                 )
-                self.data_bus.publish(
-                    DataEvent.new(
-                        event_type="task.failed",
-                        task_id=task_id,
-                        envelope_id=envelope.envelope_id,
-                        payload={
-                            "error": result.error,
-                            "target_type": envelope.target_type,
-                        },
-                    )
+                await self.data_bus.publish(
+                    event_type="task.failed",
+                    task_id=task_id,
+                    payload={
+                        "error": result.error,
+                        "target_type": envelope.target_type,
+                        "envelope_id": envelope.envelope_id,
+                    },
                 )
                 return result
 
@@ -96,29 +85,25 @@ class DataPlaneRouter:
                         "target_type": envelope.target_type,
                     },
                 )
-                self.data_bus.publish(
-                    DataEvent.new(
-                        event_type="task.failed",
-                        task_id=task_id,
-                        envelope_id=envelope.envelope_id,
-                        payload={
-                            "error": result.error,
-                            "target_type": envelope.target_type,
-                        },
-                    )
+                await self.data_bus.publish(
+                    event_type="task.failed",
+                    task_id=task_id,
+                    payload={
+                        "error": result.error,
+                        "target_type": envelope.target_type,
+                        "envelope_id": envelope.envelope_id,
+                    },
                 )
                 return result
 
-            self.data_bus.publish(
-                DataEvent.new(
-                    event_type="task.dispatched",
-                    task_id=task_id,
-                    envelope_id=envelope.envelope_id,
-                    payload={
-                        "target_type": envelope.target_type,
-                        "target": envelope.target,
-                    },
-                )
+            await self.data_bus.publish(
+                event_type="task.dispatched",
+                task_id=task_id,
+                payload={
+                    "target_type": envelope.target_type,
+                    "target": envelope.target,
+                    "envelope_id": envelope.envelope_id,
+                },
             )
 
             result = await asyncio.wait_for(
@@ -145,30 +130,26 @@ class DataPlaneRouter:
                 normalized = ExecutionResult.success_result(output=result)
 
             if normalized.ok:
-                self.data_bus.publish(
-                    DataEvent.new(
-                        event_type="task.completed",
-                        task_id=task_id,
-                        envelope_id=envelope.envelope_id,
-                        payload={
-                            "target_type": envelope.target_type,
-                            "target": envelope.target,
-                            "status": normalized.status,
-                        },
-                    )
+                await self.data_bus.publish(
+                    event_type="task.completed",
+                    task_id=task_id,
+                    payload={
+                        "target_type": envelope.target_type,
+                        "target": envelope.target,
+                        "status": normalized.status,
+                        "envelope_id": envelope.envelope_id,
+                    },
                 )
             else:
-                self.data_bus.publish(
-                    DataEvent.new(
-                        event_type="task.failed",
-                        task_id=task_id,
-                        envelope_id=envelope.envelope_id,
-                        payload={
-                            "target_type": envelope.target_type,
-                            "target": envelope.target,
-                            "error": normalized.error,
-                        },
-                    )
+                await self.data_bus.publish(
+                    event_type="task.failed",
+                    task_id=task_id,
+                    payload={
+                        "target_type": envelope.target_type,
+                        "target": envelope.target,
+                        "error": normalized.error,
+                        "envelope_id": envelope.envelope_id,
+                    },
                 )
 
             return normalized
@@ -178,16 +159,14 @@ class DataPlaneRouter:
                 error="EXECUTION_TIMEOUT",
                 metadata={"router": "data_plane"},
             )
-            self.data_bus.publish(
-                DataEvent.new(
-                    event_type="task.failed",
-                    task_id=task_id,
-                    envelope_id=envelope.envelope_id,
-                    payload={
-                        "error": result.error,
-                        "target_type": envelope.target_type,
-                    },
-                )
+            await self.data_bus.publish(
+                event_type="task.failed",
+                task_id=task_id,
+                payload={
+                    "error": result.error,
+                    "target_type": envelope.target_type,
+                    "envelope_id": envelope.envelope_id,
+                },
             )
             return result
 
@@ -197,15 +176,13 @@ class DataPlaneRouter:
                 error=str(e),
                 metadata={"router": "data_plane"},
             )
-            self.data_bus.publish(
-                DataEvent.new(
-                    event_type="task.failed",
-                    task_id=task_id,
-                    envelope_id=envelope.envelope_id,
-                    payload={
-                        "error": result.error,
-                        "target_type": envelope.target_type,
-                    },
-                )
+            await self.data_bus.publish(
+                event_type="task.failed",
+                task_id=task_id,
+                payload={
+                    "error": result.error,
+                    "target_type": envelope.target_type,
+                    "envelope_id": envelope.envelope_id,
+                },
             )
             return result

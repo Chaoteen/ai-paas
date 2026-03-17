@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from data_plane.event_envelope import EventEnvelope
@@ -9,10 +8,6 @@ from data_plane.redis_stream_bus import RedisStreamBus
 
 
 DATA_EVENTS_STREAM = "data.events"
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -76,7 +71,6 @@ class DataBus:
             return await self.repository.get_events(event_type=event_type, limit=limit)
         if hasattr(self.repository, "query"):
             return await self.repository.query(event_type=event_type, limit=limit)
-
         return []
 
     async def publish(
@@ -86,50 +80,46 @@ class DataBus:
         source: str = "data_plane",
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         final_payload: Dict[str, Any] = {}
-
         if payload:
             final_payload.update(payload)
 
-        reserved_keys = {"source", "tenant_id", "correlation_id"}
+        reserved_keys = {
+            "source",
+            "tenant_id",
+            "correlation_id",
+            "task_id",
+            "workflow_id",
+        }
         for key, value in kwargs.items():
             if key not in reserved_keys:
                 final_payload[key] = value
 
-        task_id = kwargs.get("task_id") or final_payload.get("task_id")
-        workflow_id = kwargs.get("workflow_id") or final_payload.get("workflow_id")
+        final_task_id = task_id or final_payload.get("task_id")
+        final_workflow_id = workflow_id or final_payload.get("workflow_id")
 
-        event = {
-            "event_id": None,
-            "id": None,
-            "event_type": event_type,
-            "stream": DATA_EVENTS_STREAM,
-            "source": source,
-            "task_id": task_id,
-            "workflow_id": workflow_id,
-            "tenant_id": tenant_id,
-            "correlation_id": correlation_id,
-            "payload": final_payload,
-            "occurred_at": utc_now_iso(),
-            "schema_version": "1.0",
-        }
+        envelope = EventEnvelope.new(
+            event_type=event_type,
+            stream=DATA_EVENTS_STREAM,
+            source=source,
+            payload=final_payload,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            task_id=final_task_id,
+            workflow_id=final_workflow_id,
+            schema_version="1.0",
+        )
+
+        event = envelope.to_dict()
+        saved = await self._repo_save(event)
 
         if self.event_bus is not None:
-            envelope = EventEnvelope.new(
-                event_type=event_type,
-                stream=DATA_EVENTS_STREAM,
-                source=source,
-                payload=final_payload,
-                tenant_id=tenant_id,
-                correlation_id=correlation_id,
-            )
             self.event_bus.publish(envelope)
-            event["event_id"] = envelope.event_id
-            event["id"] = envelope.event_id
 
-        saved = await self._repo_save(event)
         return saved
 
     async def router_success(
@@ -139,6 +129,7 @@ class DataBus:
         route_to: str,
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload = {
@@ -151,6 +142,7 @@ class DataBus:
         return await self.publish(
             event_type="router.success",
             task_id=task_id,
+            workflow_id=workflow_id,
             payload=payload,
             tenant_id=tenant_id,
             correlation_id=correlation_id,
@@ -163,6 +155,7 @@ class DataBus:
         error: str,
         tenant_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload = {
@@ -175,6 +168,7 @@ class DataBus:
         return await self.publish(
             event_type="router.failed",
             task_id=task_id,
+            workflow_id=workflow_id,
             payload=payload,
             tenant_id=tenant_id,
             correlation_id=correlation_id,
