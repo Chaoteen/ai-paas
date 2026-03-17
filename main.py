@@ -132,6 +132,17 @@ async def list_agents(
 
 @app.post("/runtime/tasks/submit")
 async def submit_task(req: TaskSubmitRequest) -> Dict[str, Any]:
+    # Phase 11-D: submit 幂等
+    if app.state.state_store is not None:
+        existing = await app.state.state_store.get_task(req.task_id)
+        if existing is not None:
+            return {
+                "ok": True,
+                "deduplicated": True,
+                "event": None,
+                "task_state": existing.to_dict(),
+            }
+
     event = await app.state.data_bus.publish(
         event_type="task.submitted",
         source="runtime.api",
@@ -146,9 +157,8 @@ async def submit_task(req: TaskSubmitRequest) -> Dict[str, Any]:
         },
     )
 
-    # Phase 11-C: 提交即初始化 task state，便于后续查询
     if app.state.state_store is not None:
-        await app.state.state_store.create_task(
+        task_state = await app.state.state_store.create_task(
             task_id=req.task_id,
             tenant_id=req.tenant_id,
             workflow_id=req.workflow_id,
@@ -156,9 +166,16 @@ async def submit_task(req: TaskSubmitRequest) -> Dict[str, Any]:
             input_payload=req.input,
             metadata=req.metadata,
         )
+        return {
+            "ok": True,
+            "deduplicated": False,
+            "event": event,
+            "task_state": task_state.to_dict(),
+        }
 
     return {
         "ok": True,
+        "deduplicated": False,
         "event": event,
     }
 

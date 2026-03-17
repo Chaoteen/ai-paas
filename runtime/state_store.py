@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from .workflow_state import TaskState, WorkflowState
+from .workflow_state import (
+    FINAL_TASK_STATUSES,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TaskState,
+    WorkflowState,
+)
 
 
 class InMemoryRuntimeStateStore:
@@ -93,6 +99,10 @@ class InMemoryRuntimeStateStore:
             metadata_patch=metadata_patch,
         )
         self._tasks[task_id] = state
+
+        if state.workflow_id and new_status in FINAL_TASK_STATUSES:
+            await self._refresh_workflow_status(state.workflow_id)
+
         return state
 
     async def get_workflow(self, workflow_id: str) -> Optional[WorkflowState]:
@@ -143,3 +153,25 @@ class InMemoryRuntimeStateStore:
         state.mark_failed(reason=reason)
         self._workflows[workflow_id] = state
         return state
+
+    async def _refresh_workflow_status(self, workflow_id: str) -> None:
+        workflow = self._workflows.get(workflow_id)
+        if workflow is None:
+            return
+
+        task_states = [
+            self._tasks[task_id]
+            for task_id in workflow.task_ids
+            if task_id in self._tasks
+        ]
+        if not task_states:
+            return
+
+        if any(task.status == TASK_STATUS_FAILED for task in task_states):
+            workflow.mark_failed(reason="one_or_more_tasks_failed")
+            self._workflows[workflow_id] = workflow
+            return
+
+        if all(task.status == TASK_STATUS_COMPLETED for task in task_states):
+            workflow.mark_completed()
+            self._workflows[workflow_id] = workflow

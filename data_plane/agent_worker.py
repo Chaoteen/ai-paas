@@ -19,7 +19,7 @@ from runtime.workflow_state import (
 
 class AgentWorker:
     """
-    Phase 11-B:
+    Phase 11-D:
     - 消费 router.success
     - 幂等保护，避免重复执行
     - 写入 task state
@@ -126,6 +126,11 @@ class AgentWorker:
                 owner=self.consumer_name,
             )
             if not acquired:
+                if self.state_store is not None:
+                    existing = await self.state_store.get_task(task_id)
+                    if existing is not None:
+                        existing.metadata["duplicate_router_success_ignored"] = True
+                        await self.state_store.save_task(existing)
                 return
 
         if self.state_store is not None:
