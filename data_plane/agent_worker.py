@@ -7,12 +7,22 @@ from data_plane.data_bus import DATA_EVENTS_STREAM, DataBus
 from data_plane.redis_stream_bus import RedisStreamBus
 from runtime.agent_runtime import AgentRuntime
 from runtime.execution_context import ExecutionContext
+from runtime.idempotency import InMemoryIdempotencyStore, build_event_stage_key
+from runtime.state_store import InMemoryRuntimeStateStore
+from runtime.workflow_state import (
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_EXECUTING,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_ROUTED,
+)
 
 
 class AgentWorker:
     """
-    Phase 10:
+    Phase 11-B:
     - 消费 router.success
+    - 幂等保护，避免重复执行
+    - 写入 task state
     - 发布 task.executing
     - 通过 AgentRuntime 执行
     - 发布 task.completed / task.failed
@@ -25,6 +35,8 @@ class AgentWorker:
         data_bus: DataBus,
         event_bus: RedisStreamBus,
         agent_runtime: AgentRuntime | None = None,
+        state_store: InMemoryRuntimeStateStore | None = None,
+        idempotency_store: InMemoryIdempotencyStore | None = None,
         consumer_group: str = "agent-workers",
         consumer_name: str = "agent-1",
     ) -> None:
@@ -32,6 +44,8 @@ class AgentWorker:
         self.data_bus = data_bus
         self.event_bus = event_bus
         self.agent_runtime = agent_runtime
+        self.state_store = state_store
+        self.idempotency_store = idempotency_store
         self.consumer_group = consumer_group
         self.consumer_name = consumer_name
         self._running = False
@@ -105,6 +119,35 @@ class AgentWorker:
         if not task_id:
             return
 
+        if self.idempotency_store is not None:
+            idem_key = build_event_stage_key(task_id=task_id, stage="executing")
+            acquired = await self.idempotency_store.acquire(
+                key=idem_key,
+                owner=self.consumer_name,
+            )
+            if not acquired:
+                return
+
+        if self.state_store is not None:
+            await self.state_store.create_task(
+                task_id=task_id,
+                tenant_id=tenant_id or "unknown-tenant",
+                workflow_id=workflow_id,
+                correlation_id=correlation_id,
+                input_payload=input_payload,
+                metadata=metadata,
+            )
+            await self.state_store.transition_task(
+                task_id=task_id,
+                new_status=TASK_STATUS_ROUTED,
+                event_type="router.success",
+                selected_agent_id=selected_agent_id,
+                metadata_patch={
+                    "route_to": route_to,
+                    "selected_agent_name": selected_agent_name,
+                },
+            )
+
         await self.data_bus.task_executing(
             task_id=task_id,
             workflow_id=workflow_id,
@@ -117,12 +160,29 @@ class AgentWorker:
             },
         )
 
+        if self.state_store is not None:
+            await self.state_store.transition_task(
+                task_id=task_id,
+                new_status=TASK_STATUS_EXECUTING,
+                event_type="task.executing",
+                selected_agent_id=selected_agent_id,
+            )
+
         agent = await self._get_agent_by_id(
             tenant_id=tenant_id,
             agent_id=selected_agent_id,
         )
 
         if agent is None:
+            if self.state_store is not None:
+                await self.state_store.transition_task(
+                    task_id=task_id,
+                    new_status=TASK_STATUS_FAILED,
+                    event_type="task.failed",
+                    selected_agent_id=selected_agent_id,
+                    error="AGENT_NOT_FOUND",
+                )
+
             await self.data_bus.task_failed(
                 task_id=task_id,
                 workflow_id=workflow_id,
@@ -144,6 +204,15 @@ class AgentWorker:
                 metadata=metadata,
                 required_capability=required_capability,
             )
+
+            if self.state_store is not None:
+                await self.state_store.transition_task(
+                    task_id=task_id,
+                    new_status=TASK_STATUS_COMPLETED,
+                    event_type="task.completed",
+                    selected_agent_id=agent.get("id"),
+                    output_payload=result,
+                )
 
             await self.data_bus.task_completed(
                 task_id=task_id,
@@ -174,6 +243,16 @@ class AgentWorker:
         runtime_result = await self.agent_runtime.execute(context=context)
 
         if runtime_result.status != "completed":
+            if self.state_store is not None:
+                await self.state_store.transition_task(
+                    task_id=task_id,
+                    new_status=TASK_STATUS_FAILED,
+                    event_type="task.failed",
+                    selected_agent_id=agent.get("id"),
+                    selected_skill=runtime_result.skill_name,
+                    error=runtime_result.error or "AGENT_RUNTIME_FAILED",
+                )
+
             await self.data_bus.task_failed(
                 task_id=task_id,
                 workflow_id=workflow_id,
@@ -190,22 +269,34 @@ class AgentWorker:
             )
             return
 
+        result_payload = {
+            "execution_mode": "runtime",
+            "task_id": task_id,
+            "agent_id": agent.get("id"),
+            "agent_name": agent.get("name"),
+            "required_capability": required_capability,
+            "input": input_payload,
+            "metadata": metadata,
+            "runtime": runtime_result.to_dict(),
+            "output": runtime_result.output,
+        }
+
+        if self.state_store is not None:
+            await self.state_store.transition_task(
+                task_id=task_id,
+                new_status=TASK_STATUS_COMPLETED,
+                event_type="task.completed",
+                selected_agent_id=agent.get("id"),
+                selected_skill=runtime_result.skill_name,
+                output_payload=result_payload,
+            )
+
         await self.data_bus.task_completed(
             task_id=task_id,
             workflow_id=workflow_id,
             tenant_id=tenant_id,
             correlation_id=correlation_id,
-            result={
-                "execution_mode": "runtime",
-                "task_id": task_id,
-                "agent_id": agent.get("id"),
-                "agent_name": agent.get("name"),
-                "required_capability": required_capability,
-                "input": input_payload,
-                "metadata": metadata,
-                "runtime": runtime_result.to_dict(),
-                "output": runtime_result.output,
-            },
+            result=result_payload,
             extra={
                 "selected_agent_id": agent.get("id"),
                 "selected_agent_name": agent.get("name"),

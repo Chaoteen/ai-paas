@@ -2,11 +2,17 @@ import pytest
 
 from data_plane.agent_worker import AgentWorker
 from runtime.agent_runtime import AgentRuntime
+from runtime.idempotency import InMemoryIdempotencyStore
 from runtime.llm_adapter import NoopLLMAdapter
 from runtime.policy_engine import PolicyEngine
 from runtime.skill_registry import SkillRegistry
 from runtime.skill_resolver import SkillResolver
+from runtime.state_store import InMemoryRuntimeStateStore
 from runtime.tool_executor import ToolExecutor
+from runtime.workflow_state import (
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+)
 
 
 class FakeAgentRegistry:
@@ -119,12 +125,16 @@ async def test_agent_worker_completed_with_agent_runtime():
     )
     data_bus = FakeDataBus()
     runtime = build_runtime(data_bus)
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
 
     worker = AgentWorker(
         agent_registry=registry,
         data_bus=data_bus,
         event_bus=FakeEventBus(),
         agent_runtime=runtime,
+        state_store=state_store,
+        idempotency_store=idempotency_store,
     )
 
     envelope = FakeEnvelope(
@@ -158,6 +168,12 @@ async def test_agent_worker_completed_with_agent_runtime():
     assert completed["result"]["runtime"]["skill_name"] == "echo"
     assert completed["result"]["output"]["mode"] == "tool"
 
+    state = await state_store.get_task("task_100")
+    assert state is not None
+    assert state.status == TASK_STATUS_COMPLETED
+    assert state.selected_agent_id == "agent_translation_001"
+    assert state.selected_skill == "echo"
+
     event_types = [e["event_type"] for e in data_bus.published_events]
     assert "skill.selected" in event_types
     assert "tool.invoking" in event_types
@@ -169,12 +185,16 @@ async def test_agent_worker_failed_when_agent_not_found():
     registry = FakeAgentRegistry([])
     data_bus = FakeDataBus()
     runtime = build_runtime(data_bus)
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
 
     worker = AgentWorker(
         agent_registry=registry,
         data_bus=data_bus,
         event_bus=FakeEventBus(),
         agent_runtime=runtime,
+        state_store=state_store,
+        idempotency_store=idempotency_store,
     )
 
     envelope = FakeEnvelope(
@@ -201,6 +221,11 @@ async def test_agent_worker_failed_when_agent_not_found():
     assert len(data_bus.completed_events) == 0
     assert len(data_bus.failed_events) == 1
     assert data_bus.failed_events[0]["error"] == "AGENT_NOT_FOUND"
+
+    state = await state_store.get_task("task_101")
+    assert state is not None
+    assert state.status == TASK_STATUS_FAILED
+    assert state.error == "AGENT_NOT_FOUND"
 
 
 @pytest.mark.asyncio
@@ -244,6 +269,8 @@ tools:
         ]
     )
     data_bus = FakeDataBus()
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
 
     runtime_registry = SkillRegistry(
         bundled_dir=str(tmp_path / "bundled"),
@@ -264,6 +291,8 @@ tools:
         data_bus=data_bus,
         event_bus=FakeEventBus(),
         agent_runtime=runtime,
+        state_store=state_store,
+        idempotency_store=idempotency_store,
     )
 
     envelope = FakeEnvelope(
@@ -291,6 +320,67 @@ tools:
     assert len(data_bus.failed_events) == 1
     assert "unauthorized capabilities" in data_bus.failed_events[0]["error"]
 
+    state = await state_store.get_task("task_102")
+    assert state is not None
+    assert state.status == TASK_STATUS_FAILED
+
     event_types = [e["event_type"] for e in data_bus.published_events]
     assert "skill.selected" in event_types
     assert "security.denied" in event_types
+
+
+@pytest.mark.asyncio
+async def test_agent_worker_ignores_duplicate_router_success():
+    registry = FakeAgentRegistry(
+        [
+            {
+                "id": "agent_translation_001",
+                "name": "translator-agent",
+                "tenant_id": "tenant_a",
+                "status": "healthy",
+                "metadata": {},
+            }
+        ]
+    )
+    data_bus = FakeDataBus()
+    runtime = build_runtime(data_bus)
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
+
+    worker = AgentWorker(
+        agent_registry=registry,
+        data_bus=data_bus,
+        event_bus=FakeEventBus(),
+        agent_runtime=runtime,
+        state_store=state_store,
+        idempotency_store=idempotency_store,
+    )
+
+    envelope = FakeEnvelope(
+        task_id="task_200",
+        workflow_id="wf_200",
+        tenant_id="tenant_a",
+        correlation_id="corr_200",
+        payload={
+            "task_id": "task_200",
+            "route_to": "agent_translation_001",
+            "extra": {
+                "selected_agent_id": "agent_translation_001",
+                "selected_agent_name": "translator-agent",
+                "required_capability": "echo",
+                "input": {"text": "hello"},
+                "metadata": {},
+            },
+        },
+    )
+
+    await worker._handle_envelope(envelope)
+    await worker._handle_envelope(envelope)
+
+    assert len(data_bus.executing_events) == 1
+    assert len(data_bus.completed_events) == 1
+    assert len(data_bus.failed_events) == 0
+
+    state = await state_store.get_task("task_200")
+    assert state is not None
+    assert state.status == TASK_STATUS_COMPLETED

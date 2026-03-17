@@ -1,143 +1,128 @@
 from __future__ import annotations
 
-from dotenv import load_dotenv
-load_dotenv(override=True)
-
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Any, Dict, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from bootstrap.runtime_bootstrap import build_runtime_state
 
 
+class AgentRegisterRequest(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    version: str = "1.0.0"
+    status: str = "healthy"
+    capabilities: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class TaskSubmitRequest(BaseModel):
     tenant_id: str
     task_id: str
-    workflow_id: str | None = None
-    correlation_id: str | None = None
-    required_capability: str = Field(..., description="例如 translation / analysis / code_generation")
-    input: dict = Field(default_factory=dict)
-    metadata: dict = Field(default_factory=dict)
+    workflow_id: Optional[str] = None
+    correlation_id: Optional[str] = None
+    required_capability: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     runtime_state = await build_runtime_state()
 
-    app.state.runtime_mode = runtime_state["mode"]
-    app.state.db = runtime_state["db"]
+    app.state.runtime_state = runtime_state
     app.state.agent_registry = runtime_state["agent_registry"]
     app.state.control_bus = runtime_state["control_bus"]
     app.state.data_bus = runtime_state["data_bus"]
+    app.state.agent_runtime = runtime_state.get("agent_runtime")
+    app.state.state_store = runtime_state.get("state_store")
+    app.state.idempotency_store = runtime_state.get("idempotency_store")
     app.state.router_worker = runtime_state.get("router_worker")
     app.state.agent_worker = runtime_state.get("agent_worker")
 
-    router_task = None
-    agent_task = None
+    background_tasks = []
 
-    router_worker = app.state.router_worker
-    agent_worker = app.state.agent_worker
-
-    if router_worker is not None:
-        router_task = asyncio.create_task(router_worker.start())
-
-    if agent_worker is not None:
-        agent_task = asyncio.create_task(agent_worker.start())
+    if app.state.router_worker is not None:
+        background_tasks.append(asyncio.create_task(app.state.router_worker.start()))
+    if app.state.agent_worker is not None:
+        background_tasks.append(asyncio.create_task(app.state.agent_worker.start()))
 
     try:
         yield
     finally:
-        if router_worker is not None:
-            await router_worker.stop()
+        if app.state.router_worker is not None:
+            await app.state.router_worker.stop()
+        if app.state.agent_worker is not None:
+            await app.state.agent_worker.stop()
 
-        if agent_worker is not None:
-            await agent_worker.stop()
-
-        if router_task is not None:
-            router_task.cancel()
-            try:
-                await router_task
-            except asyncio.CancelledError:
-                pass
-
-        if agent_task is not None:
-            agent_task.cancel()
-            try:
-                await agent_task
-            except asyncio.CancelledError:
-                pass
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
 
         db = runtime_state.get("db")
         if db is not None:
             await db.dispose()
 
 
-app = FastAPI(
-    title="AI-PaaS Runtime",
-    version="0.3.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="AI-PaaS Runtime", lifespan=lifespan)
 
 
 @app.get("/health")
-async def health():
+async def health() -> Dict[str, Any]:
+    runtime_state = app.state.runtime_state
     return {
         "status": "ok",
-        "runtime_mode": app.state.runtime_mode,
+        "runtime_mode": runtime_state["mode"],
         "router_worker": app.state.router_worker is not None,
         "agent_worker": app.state.agent_worker is not None,
     }
 
 
 @app.get("/runtime/info")
-async def runtime_info():
+async def runtime_info() -> Dict[str, Any]:
+    runtime_state = app.state.runtime_state
     return {
-        "runtime_mode": app.state.runtime_mode,
-        "persistence": "postgres" if app.state.runtime_mode == "postgres" else "memory",
+        "ok": True,
+        "mode": runtime_state["mode"],
+        "has_agent_runtime": app.state.agent_runtime is not None,
+        "has_state_store": app.state.state_store is not None,
+        "has_idempotency_store": app.state.idempotency_store is not None,
         "router_worker": app.state.router_worker is not None,
         "agent_worker": app.state.agent_worker is not None,
     }
 
 
 @app.post("/runtime/agents/register")
-async def register_agent(payload: dict):
-    agent = await app.state.agent_registry.register_agent(payload)
+async def register_agent(req: AgentRegisterRequest) -> Dict[str, Any]:
+    agent_registry = app.state.agent_registry
+
+    agent = await agent_registry.register_agent(
+        {
+            "id": req.id,
+            "tenant_id": req.tenant_id,
+            "name": req.name,
+            "version": req.version,
+            "status": req.status,
+            "capabilities": req.capabilities,
+            "metadata": req.metadata,
+        }
+    )
     return {
         "ok": True,
         "agent": agent,
     }
 
 
-@app.post("/runtime/agents/{agent_id}/heartbeat")
-async def heartbeat_agent(agent_id: str):
-    ok = await app.state.agent_registry.heartbeat(agent_id)
-    return {
-        "ok": ok,
-        "agent_id": agent_id,
-    }
-
-
 @app.get("/runtime/agents")
-async def list_agents(tenant_id: str | None = None):
-    agents = await app.state.agent_registry.list_agents(tenant_id=tenant_id)
-    return {
-        "ok": True,
-        "items": agents,
-        "count": len(agents),
-    }
-
-
-@app.get("/runtime/control-events")
-async def list_control_events(
-    event_type: str | None = None,
-    limit: int = 100,
-):
-    items = await app.state.control_bus.list_events(
-        event_type=event_type,
-        limit=limit,
-    )
+async def list_agents(
+    tenant_id: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    items = await app.state.agent_registry.list_agents(tenant_id=tenant_id)
     return {
         "ok": True,
         "items": items,
@@ -145,11 +130,44 @@ async def list_control_events(
     }
 
 
+@app.post("/runtime/tasks/submit")
+async def submit_task(req: TaskSubmitRequest) -> Dict[str, Any]:
+    event = await app.state.data_bus.publish(
+        event_type="task.submitted",
+        source="runtime.api",
+        tenant_id=req.tenant_id,
+        correlation_id=req.correlation_id,
+        task_id=req.task_id,
+        workflow_id=req.workflow_id,
+        payload={
+            "required_capability": req.required_capability,
+            "input": req.input,
+            "metadata": req.metadata,
+        },
+    )
+
+    # Phase 11-C: 提交即初始化 task state，便于后续查询
+    if app.state.state_store is not None:
+        await app.state.state_store.create_task(
+            task_id=req.task_id,
+            tenant_id=req.tenant_id,
+            workflow_id=req.workflow_id,
+            correlation_id=req.correlation_id,
+            input_payload=req.input,
+            metadata=req.metadata,
+        )
+
+    return {
+        "ok": True,
+        "event": event,
+    }
+
+
 @app.get("/runtime/data-events")
 async def list_data_events(
-    event_type: str | None = None,
-    limit: int = 100,
-):
+    event_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> Dict[str, Any]:
     items = await app.state.data_bus.list_events(
         event_type=event_type,
         limit=limit,
@@ -161,22 +179,69 @@ async def list_data_events(
     }
 
 
-@app.post("/runtime/tasks/submit")
-async def submit_task(req: TaskSubmitRequest):
-    event = await app.state.data_bus.publish(
-        event_type="task.submitted",
-        payload={
-            "input": req.input,
-            "metadata": req.metadata,
-            "required_capability": req.required_capability,
-        },
-        source="runtime.api",
-        tenant_id=req.tenant_id,
-        correlation_id=req.correlation_id,
-        task_id=req.task_id,
-        workflow_id=req.workflow_id,
+@app.get("/runtime/control-events")
+async def list_control_events(
+    event_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> Dict[str, Any]:
+    items = await app.state.control_bus.list_events(
+        event_type=event_type,
+        limit=limit,
     )
     return {
         "ok": True,
-        "event": event,
+        "items": items,
+        "count": len(items),
+    }
+
+
+@app.get("/runtime/tasks/{task_id}/state")
+async def get_task_state(task_id: str) -> Dict[str, Any]:
+    state_store = app.state.state_store
+    if state_store is None:
+        raise HTTPException(status_code=503, detail="state_store_not_configured")
+
+    task_state = await state_store.get_task(task_id)
+    if task_state is None:
+        raise HTTPException(status_code=404, detail="task_state_not_found")
+
+    return {
+        "ok": True,
+        "item": task_state.to_dict(),
+    }
+
+
+@app.get("/runtime/task-states")
+async def list_task_states(
+    tenant_id: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+) -> Dict[str, Any]:
+    state_store = app.state.state_store
+    if state_store is None:
+        raise HTTPException(status_code=503, detail="state_store_not_configured")
+
+    items = await state_store.list_tasks(
+        tenant_id=tenant_id,
+        status=status,
+    )
+    return {
+        "ok": True,
+        "items": [x.to_dict() for x in items],
+        "count": len(items),
+    }
+
+
+@app.get("/runtime/workflows/{workflow_id}/state")
+async def get_workflow_state(workflow_id: str) -> Dict[str, Any]:
+    state_store = app.state.state_store
+    if state_store is None:
+        raise HTTPException(status_code=503, detail="state_store_not_configured")
+
+    workflow_state = await state_store.get_workflow(workflow_id)
+    if workflow_state is None:
+        raise HTTPException(status_code=404, detail="workflow_state_not_found")
+
+    return {
+        "ok": True,
+        "item": workflow_state.to_dict(),
     }

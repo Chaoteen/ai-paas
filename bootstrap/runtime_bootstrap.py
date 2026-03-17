@@ -14,10 +14,12 @@ from control_plane.control_bus import ControlBus, InMemoryControlEventRepository
 from data_plane.data_bus import DataBus, InMemoryDataEventRepository
 from data_plane.redis_stream_bus import RedisStreamBus
 from runtime.agent_runtime import AgentRuntime
+from runtime.idempotency import InMemoryIdempotencyStore
 from runtime.llm_adapter import NoopLLMAdapter
 from runtime.policy_engine import PolicyEngine
 from runtime.skill_registry import SkillRegistry
 from runtime.skill_resolver import SkillResolver
+from runtime.state_store import InMemoryRuntimeStateStore
 from runtime.tool_executor import ToolExecutor
 
 
@@ -233,6 +235,8 @@ def _build_agent_worker_if_possible(
     data_bus: DataBus,
     event_bus: RedisStreamBus | None,
     agent_runtime: AgentRuntime,
+    state_store: InMemoryRuntimeStateStore,
+    idempotency_store: InMemoryIdempotencyStore,
 ):
     if event_bus is None:
         return None
@@ -244,6 +248,8 @@ def _build_agent_worker_if_possible(
         data_bus=data_bus,
         event_bus=event_bus,
         agent_runtime=agent_runtime,
+        state_store=state_store,
+        idempotency_store=idempotency_store,
         consumer_group="agent-workers",
         consumer_name=os.getenv("AI_PAAS_AGENT_CONSUMER", "agent-1"),
     )
@@ -265,8 +271,18 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
     agent_runtime = _build_agent_runtime(data_bus)
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
+
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
-    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus, agent_runtime)
+    agent_worker = _build_agent_worker_if_possible(
+        agent_registry,
+        data_bus,
+        event_bus,
+        agent_runtime,
+        state_store,
+        idempotency_store,
+    )
 
     return {
         "mode": "memory",
@@ -275,6 +291,8 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         "control_bus": control_bus,
         "data_bus": data_bus,
         "agent_runtime": agent_runtime,
+        "state_store": state_store,
+        "idempotency_store": idempotency_store,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }
@@ -301,8 +319,18 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
     agent_runtime = _build_agent_runtime(data_bus)
+    state_store = InMemoryRuntimeStateStore()
+    idempotency_store = InMemoryIdempotencyStore()
+
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
-    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus, agent_runtime)
+    agent_worker = _build_agent_worker_if_possible(
+        agent_registry,
+        data_bus,
+        event_bus,
+        agent_runtime,
+        state_store,
+        idempotency_store,
+    )
 
     return {
         "mode": "postgres",
@@ -311,6 +339,8 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         "control_bus": control_bus,
         "data_bus": data_bus,
         "agent_runtime": agent_runtime,
+        "state_store": state_store,
+        "idempotency_store": idempotency_store,
         "router_worker": router_worker,
         "agent_worker": agent_worker,
     }
