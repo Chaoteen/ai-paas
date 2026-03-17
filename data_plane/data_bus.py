@@ -174,6 +174,82 @@ class DataBus:
             correlation_id=correlation_id,
         )
 
+    async def task_executing(
+        self,
+        *,
+        task_id: str,
+        workflow_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        route_to: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {"task_id": task_id}
+        if route_to is not None:
+            payload["route_to"] = route_to
+        if extra:
+            payload["extra"] = extra
+
+        return await self.publish(
+            event_type="task.executing",
+            task_id=task_id,
+            workflow_id=workflow_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+
+    async def task_completed(
+        self,
+        *,
+        task_id: str,
+        workflow_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        result: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {"task_id": task_id}
+        if result is not None:
+            payload["result"] = result
+        if extra:
+            payload["extra"] = extra
+
+        return await self.publish(
+            event_type="task.completed",
+            task_id=task_id,
+            workflow_id=workflow_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+
+    async def task_failed(
+        self,
+        *,
+        task_id: str,
+        error: str,
+        workflow_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "task_id": task_id,
+            "error": error,
+        }
+        if extra:
+            payload["extra"] = extra
+
+        return await self.publish(
+            event_type="task.failed",
+            task_id=task_id,
+            workflow_id=workflow_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+            payload=payload,
+        )
+
     async def workflow_started(
         self,
         *,

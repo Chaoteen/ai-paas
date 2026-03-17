@@ -32,11 +32,19 @@ async def lifespan(app: FastAPI):
     app.state.control_bus = runtime_state["control_bus"]
     app.state.data_bus = runtime_state["data_bus"]
     app.state.router_worker = runtime_state.get("router_worker")
+    app.state.agent_worker = runtime_state.get("agent_worker")
 
     router_task = None
+    agent_task = None
+
     router_worker = app.state.router_worker
+    agent_worker = app.state.agent_worker
+
     if router_worker is not None:
         router_task = asyncio.create_task(router_worker.start())
+
+    if agent_worker is not None:
+        agent_task = asyncio.create_task(agent_worker.start())
 
     try:
         yield
@@ -44,10 +52,20 @@ async def lifespan(app: FastAPI):
         if router_worker is not None:
             await router_worker.stop()
 
+        if agent_worker is not None:
+            await agent_worker.stop()
+
         if router_task is not None:
             router_task.cancel()
             try:
                 await router_task
+            except asyncio.CancelledError:
+                pass
+
+        if agent_task is not None:
+            agent_task.cancel()
+            try:
+                await agent_task
             except asyncio.CancelledError:
                 pass
 
@@ -58,7 +76,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI-PaaS Runtime",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -69,6 +87,7 @@ async def health():
         "status": "ok",
         "runtime_mode": app.state.runtime_mode,
         "router_worker": app.state.router_worker is not None,
+        "agent_worker": app.state.agent_worker is not None,
     }
 
 
@@ -78,6 +97,7 @@ async def runtime_info():
         "runtime_mode": app.state.runtime_mode,
         "persistence": "postgres" if app.state.runtime_mode == "postgres" else "memory",
         "router_worker": app.state.router_worker is not None,
+        "agent_worker": app.state.agent_worker is not None,
     }
 
 

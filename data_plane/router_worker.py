@@ -9,9 +9,6 @@ from data_plane.redis_stream_bus import RedisStreamBus
 
 
 def _parse_dt(value: Any) -> datetime:
-    """
-    统一返回 timezone-aware datetime，避免 naive/aware 比较异常
-    """
     if value is None:
         return datetime.min.replace(tzinfo=timezone.utc)
 
@@ -87,6 +84,8 @@ class RouterWorker:
         tenant_id = envelope.tenant_id
         correlation_id = envelope.correlation_id
         required_capability = envelope.payload.get("required_capability")
+        input_payload = envelope.payload.get("input")
+        metadata = envelope.payload.get("metadata", {})
 
         if not task_id:
             await self.data_bus.router_failed(
@@ -138,6 +137,8 @@ class RouterWorker:
                 "selected_agent_id": selected.get("id"),
                 "selected_agent_name": selected.get("name"),
                 "required_capability": required_capability,
+                "input": input_payload,
+                "metadata": metadata,
             },
         )
 

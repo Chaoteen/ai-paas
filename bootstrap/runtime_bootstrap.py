@@ -189,6 +189,19 @@ def _build_router_worker_if_possible(agent_registry: Any, data_bus: DataBus, eve
     )
 
 
+def _build_agent_worker_if_possible(agent_registry: Any, data_bus: DataBus, event_bus: RedisStreamBus | None):
+    if event_bus is None:
+        return None
+    from data_plane.agent_worker import AgentWorker
+    return AgentWorker(
+        agent_registry=agent_registry,
+        data_bus=data_bus,
+        event_bus=event_bus,
+        consumer_group="agent-workers",
+        consumer_name=os.getenv("AI_PAAS_AGENT_CONSUMER", "agent-1"),
+    )
+
+
 async def _build_memory_runtime_state() -> Dict[str, Any]:
     event_bus = _build_event_bus_if_needed()
 
@@ -205,6 +218,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
+    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus)
 
     return {
         "mode": "memory",
@@ -213,6 +227,7 @@ async def _build_memory_runtime_state() -> Dict[str, Any]:
         "control_bus": control_bus,
         "data_bus": data_bus,
         "router_worker": router_worker,
+        "agent_worker": agent_worker,
     }
 
 
@@ -237,6 +252,7 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
 
     agent_registry = _build_agent_registry(agent_repo, control_bus)
     router_worker = _build_router_worker_if_possible(agent_registry, data_bus, event_bus)
+    agent_worker = _build_agent_worker_if_possible(agent_registry, data_bus, event_bus)
 
     return {
         "mode": "postgres",
@@ -245,6 +261,7 @@ async def _build_postgres_runtime_state() -> Dict[str, Any]:
         "control_bus": control_bus,
         "data_bus": data_bus,
         "router_worker": router_worker,
+        "agent_worker": agent_worker,
     }
 
 
