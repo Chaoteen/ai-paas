@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from .capability_guard import CapabilityGuard, CapabilityGuardDecision
+from .capability_guard import CapabilityGuard
 from .execution_context import ExecutionContext
 from .llm_adapter import BaseLLMAdapter, NoopLLMAdapter
 from .policy_engine import PolicyDecision, PolicyEngine
@@ -205,12 +205,24 @@ class AgentRuntime:
             },
         )
 
-        tool_result = await self.tool_executor.execute(
-            context=context,
-            skill=skill,
-            tool_name=tool_name,
-            arguments=args,
-        )
+        try:
+            tool_result = await self.tool_executor.execute(
+                context=context,
+                skill=skill,
+                tool_name=tool_name,
+                arguments=args,
+            )
+        except Exception as exc:
+            await self._publish(
+                event_type="security.denied",
+                context=context,
+                payload={
+                    "skill_name": skill.name,
+                    "tool_name": tool_name,
+                    "reasons": [str(exc)],
+                },
+            )
+            raise
 
         await self._publish(
             event_type="tool.completed",

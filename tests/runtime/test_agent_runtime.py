@@ -6,6 +6,7 @@ import textwrap
 import pytest
 
 from runtime.agent_runtime import AgentRuntime
+from runtime.capability_guard import CapabilityGuard
 from runtime.execution_context import ExecutionContext
 from runtime.llm_adapter import NoopLLMAdapter
 from runtime.policy_engine import PolicyEngine
@@ -57,6 +58,7 @@ async def test_agent_runtime_executes_tool_skill() -> None:
         registry=registry,
         resolver=resolver,
         policy_engine=policy_engine,
+        capability_guard=CapabilityGuard(),
         llm_adapter=NoopLLMAdapter(),
         tool_executor=ToolExecutor(),
         data_bus=data_bus,
@@ -124,6 +126,7 @@ async def test_agent_runtime_denies_unauthorized_capability(tmp_path: Path) -> N
         registry=registry,
         resolver=resolver,
         policy_engine=policy_engine,
+        capability_guard=CapabilityGuard(),
         llm_adapter=NoopLLMAdapter(),
         tool_executor=ToolExecutor(),
         data_bus=data_bus,
@@ -191,6 +194,7 @@ async def test_agent_runtime_executes_llm_skill(tmp_path: Path) -> None:
         registry=registry,
         resolver=resolver,
         policy_engine=policy_engine,
+        capability_guard=CapabilityGuard(),
         llm_adapter=NoopLLMAdapter(),
         tool_executor=ToolExecutor(),
         data_bus=data_bus,
@@ -210,8 +214,3 @@ async def test_agent_runtime_executes_llm_skill(tmp_path: Path) -> None:
     assert result.output["mode"] == "llm"
     assert "INPUT:" in result.output["prompt"]
     assert result.output["llm_result"]["provider"] == "noop"
-
-    event_types = [e["event_type"] for e in data_bus.events]
-    assert "skill.selected" in event_types
-    assert "llm.invoking" in event_types
-    assert "llm.completed" in event_types

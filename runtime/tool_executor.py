@@ -4,9 +4,17 @@ from typing import Any, Dict
 
 from .execution_context import ExecutionContext
 from .skill_manifest import SkillManifest
+from .tool_capability_guard import ToolCapabilityDecision, ToolCapabilityGuard
 
 
 class ToolExecutor:
+    def __init__(
+        self,
+        *,
+        capability_guard: ToolCapabilityGuard | None = None,
+    ) -> None:
+        self.capability_guard = capability_guard or ToolCapabilityGuard()
+
     async def execute(
         self,
         *,
@@ -17,6 +25,13 @@ class ToolExecutor:
     ) -> Dict[str, Any]:
         args = arguments or {}
 
+        decision = self.capability_guard.evaluate(
+            tool_name=tool_name,
+            allowed_capabilities=context.allowed_capabilities,
+        )
+        if not decision.allowed:
+            raise RuntimeError("; ".join(decision.reasons))
+
         if tool_name == "echo":
             return {
                 "tool_name": "echo",
@@ -25,6 +40,7 @@ class ToolExecutor:
                 "metadata": {
                     "trace_id": context.trace_id,
                     "skill": skill.name,
+                    "granted_capabilities": decision.granted_capabilities,
                 },
             }
 
@@ -43,6 +59,23 @@ class ToolExecutor:
                 "metadata": {
                     "trace_id": context.trace_id,
                     "skill": skill.name,
+                    "granted_capabilities": decision.granted_capabilities,
+                },
+            }
+
+        if tool_name == "http.fetch":
+            # Phase 12-B 先不做真实网络请求，只验证 capability enforcement
+            return {
+                "tool_name": "http.fetch",
+                "status": "ok",
+                "result": {
+                    "url": args.get("url"),
+                    "note": "network tool placeholder",
+                },
+                "metadata": {
+                    "trace_id": context.trace_id,
+                    "skill": skill.name,
+                    "granted_capabilities": decision.granted_capabilities,
                 },
             }
 
