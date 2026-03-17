@@ -1,4 +1,5 @@
 from .agent_runtime import AgentRuntime, AgentRuntimeResult
+from .capability_guard import CapabilityGuard, CapabilityGuardDecision
 from .execution_context import ExecutionContext
 from .skill_manifest import SkillManifest
 from .skill_registry import SkillRegistry
@@ -18,6 +19,8 @@ from .idempotency import (
 __all__ = [
     "AgentRuntime",
     "AgentRuntimeResult",
+    "CapabilityGuard",
+    "CapabilityGuardDecision",
     "ExecutionContext",
     "SkillManifest",
     "SkillRegistry",

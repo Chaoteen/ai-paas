@@ -140,7 +140,8 @@ async def test_agent_runtime_denies_unauthorized_capability(tmp_path: Path) -> N
     result = await runtime.execute(context=context)
 
     assert result.status == "failed"
-    assert "unauthorized capabilities" in (result.error or "")
+    assert "requires capabilities" in (result.error or "")
+    assert "denied: network" in (result.error or "")
 
     event_types = [e["event_type"] for e in data_bus.events]
     assert "skill.selected" in event_types

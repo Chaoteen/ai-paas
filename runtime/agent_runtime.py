@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from .capability_guard import CapabilityGuard, CapabilityGuardDecision
 from .execution_context import ExecutionContext
 from .llm_adapter import BaseLLMAdapter, NoopLLMAdapter
 from .policy_engine import PolicyDecision, PolicyEngine
@@ -39,6 +40,7 @@ class AgentRuntime:
         registry: SkillRegistry,
         resolver: SkillResolver,
         policy_engine: PolicyEngine,
+        capability_guard: CapabilityGuard | None = None,
         llm_adapter: BaseLLMAdapter | None = None,
         tool_executor: ToolExecutor | None = None,
         data_bus: Any | None = None,
@@ -46,6 +48,7 @@ class AgentRuntime:
         self.registry = registry
         self.resolver = resolver
         self.policy_engine = policy_engine
+        self.capability_guard = capability_guard or CapabilityGuard()
         self.llm_adapter = llm_adapter or NoopLLMAdapter()
         self.tool_executor = tool_executor or ToolExecutor()
         self.data_bus = data_bus
@@ -67,6 +70,28 @@ class AgentRuntime:
                     "skill_version": skill.version,
                 },
             )
+
+            capability_decision = self.capability_guard.evaluate(
+                context=context,
+                skill=skill,
+            )
+            if not capability_decision.allowed:
+                await self._publish(
+                    event_type="security.denied",
+                    context=context,
+                    payload={
+                        "skill_name": skill.name,
+                        "reasons": capability_decision.reasons,
+                        "required_capabilities": capability_decision.required_capabilities,
+                        "denied_capabilities": capability_decision.denied_capabilities,
+                    },
+                )
+                return AgentRuntimeResult(
+                    status="failed",
+                    skill_name=skill.name,
+                    skill_source=skill.source,
+                    error="; ".join(capability_decision.reasons),
+                )
 
             decision = self.policy_engine.evaluate(context=context, skill=skill)
             if not decision.allowed:
@@ -100,11 +125,15 @@ class AgentRuntime:
                     granted=decision,
                 )
 
+            granted_caps = sorted(
+                set(capability_decision.granted_capabilities) | set(decision.granted_capabilities)
+            )
+
             return AgentRuntimeResult(
                 status="completed",
                 skill_name=skill.name,
                 skill_source=skill.source,
-                granted_capabilities=decision.granted_capabilities,
+                granted_capabilities=granted_caps,
                 output=result,
             )
         except Exception as exc:
