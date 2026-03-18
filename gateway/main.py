@@ -7,7 +7,7 @@ from gateway.api.ui import router as ui_router
 from gateway.api.health import router as health_router
 from gateway.api.agent_runtime import router as agent_runtime_router
 from gateway.api.generation import router as generation_router
-
+from gateway.api.tasks import router as tasks_router
 app = FastAPI()
 
 
@@ -28,6 +28,7 @@ app.include_router(health_router, prefix="/api")
 app.include_router(ui_router, prefix="/api")
 app.include_router(agent_runtime_router, prefix="/api/v1")
 app.include_router(generation_router, prefix="/api/v1")
+app.include_router(tasks_router, prefix="/api/v1")
 
 
 @app.get("/api/ui/bootstrap-legacy")
