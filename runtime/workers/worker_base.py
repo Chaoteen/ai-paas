@@ -1,82 +1,133 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional
+import logging
+from abc import ABC, abstractmethod
+from typing import Any, Optional
 
-from runtime.queue.redis_queue import QueueMessage, RedisStreamQueueClient
 from runtime.queue.task_models import TaskEnvelope
-from runtime.queue.task_store import InMemoryTaskStore
+from runtime.queue.task_store import TaskStore
+
+logger = logging.getLogger(__name__)
 
 
-class WorkerBase:
+class WorkerExecutionError(Exception):
+    """Raised when a worker cannot complete task execution flow."""
+
+
+class WorkerBase(ABC):
     """
-    Phase 16D base worker loop.
+    Base class for queue-driven runtime workers.
 
     Responsibilities:
-    - ensure Redis consumer group exists
-    - read queued tasks from a specific queue
-    - mark task state transitions
-    - delegate actual execution to subclass
-    - update task store
-    - ack queue message when processing completes
+    1. Ensure the consumer group exists.
+    2. Poll one or more tasks from the broker.
+    3. Transition task state through RUNNING / SUCCEEDED / FAILED.
+    4. Persist state changes into TaskStore.
+    5. Ack broker messages after processing completes.
 
-    Subclasses must implement:
-    - process_task(task: TaskEnvelope) -> dict
+    This class assumes:
+    - queue.read_tasks() returns list[tuple[message_id, TaskEnvelope]]
+    - queue.ack_task() acks by stream/group/message_id
+    - store is async and authoritative for task state
     """
+
+    stream_name: str = ""
+    group_name: str = ""
 
     def __init__(
         self,
         *,
-        queue_client: RedisStreamQueueClient,
-        task_store: InMemoryTaskStore,
-        queue_name: str,
+        queue: Any,
+        store: TaskStore,
         consumer_name: str,
     ) -> None:
-        self.queue_client = queue_client
-        self.task_store = task_store
-        self.queue_name = queue_name
-        self.consumer_name = consumer_name
+        if queue is None:
+            raise ValueError("queue must not be None")
+        if store is None:
+            raise ValueError("store must not be None")
+        if not isinstance(consumer_name, str) or not consumer_name.strip():
+            raise ValueError("consumer_name must be a non-empty string")
+        if not self.stream_name:
+            raise ValueError("stream_name must be defined on subclass")
+        if not self.group_name:
+            raise ValueError("group_name must be defined on subclass")
 
-    async def ensure_queue(self) -> None:
-        await self.queue_client.ensure_consumer_group(self.queue_name)
+        self.queue = queue
+        self.store = store
+        self.consumer_name = consumer_name.strip()
 
-    async def poll_once(self, *, count: int = 10, block_ms: int = 1000) -> int:
-        messages = await self.queue_client.read_tasks(
-            self.queue_name,
+    async def run_once(self, *, count: int = 1, block_ms: int = 1000) -> int:
+        """
+        Process a single poll cycle.
+
+        Returns:
+            number of messages received from the queue
+        """
+        await self.queue.ensure_consumer_group(self.stream_name, self.group_name)
+
+        messages = await self.queue.read_tasks(
+            stream_name=self.stream_name,
+            group_name=self.group_name,
             consumer_name=self.consumer_name,
             count=count,
             block_ms=block_ms,
         )
 
-        processed = 0
-        for message in messages:
-            await self._handle_message(message)
-            processed += 1
-        return processed
+        if not messages:
+            return 0
 
-    async def _handle_message(self, message: QueueMessage) -> None:
-        task = message.task
+        for message_id, task in messages:
+            await self._process_message(message_id=message_id, task=task)
 
-        # persist / refresh the queued task into the store
-        self.task_store.put(task)
+        return len(messages)
 
-        task.mark_running()
-        self.task_store.update(task)
+    async def _process_message(self, *, message_id: str, task: TaskEnvelope) -> None:
+        if not isinstance(task, TaskEnvelope):
+            raise WorkerExecutionError(
+                f"Expected TaskEnvelope, got {type(task)!r}"
+            )
 
         try:
-            result = await self.process_task(task)
+            task.mark_running()
+            await self.store.put(task)
+
+            result = await self.execute_task(task)
+
+            if not isinstance(result, dict):
+                raise WorkerExecutionError(
+                    f"execute_task must return dict, got {type(result)!r}"
+                )
+
             task.mark_succeeded(result)
-            self.task_store.update(task)
+            await self.store.put(task)
+
         except Exception as exc:
-            task.increment_retry()
+            logger.exception(
+                "Worker task execution failed",
+                extra={
+                    "task_id": task.task_id,
+                    "stream_name": self.stream_name,
+                    "group_name": self.group_name,
+                    "consumer_name": self.consumer_name,
+                },
+            )
             task.mark_failed(
                 {
                     "type": exc.__class__.__name__,
                     "message": str(exc),
                 }
             )
-            self.task_store.update(task)
-        finally:
-            await self.queue_client.ack_task(self.queue_name, message.message_id)
+            await self.store.put(task)
 
-    async def process_task(self, task: TaskEnvelope) -> Optional[dict]:
-        raise NotImplementedError
+        finally:
+            await self.queue.ack_task(
+                stream_name=self.stream_name,
+                group_name=self.group_name,
+                message_id=message_id,
+            )
+
+    @abstractmethod
+    async def execute_task(self, task: TaskEnvelope) -> dict:
+        """
+        Execute a single task and return a structured result payload.
+        """

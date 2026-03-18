@@ -1,272 +1,196 @@
-from __future__ import annotations
+import pytest
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List
-
-from runtime.queue.redis_queue import RedisStreamQueueClient
 from runtime.queue.task_models import (
     AgentTaskPayload,
-    GenerationTaskKind,
     GenerationTaskPayload,
     TaskEnvelope,
-    TaskStatus,
 )
 from runtime.queue.task_store import InMemoryTaskStore
 from runtime.workers.agent_worker import AgentWorker
 from runtime.workers.generation_worker import GenerationWorker
 
 
-class FakeRedisStreamClient:
-    def __init__(self) -> None:
-        self.streams: Dict[str, List[tuple[str, Dict[str, Any]]]] = {}
-        self.groups: set[tuple[str, str]] = set()
-        self.acked: List[tuple[str, str, str]] = []
-        self._counter = 0
+class FakeQueue:
+    def __init__(self, messages):
+        self._messages = messages
+        self.acked = []
+        self.ensure_calls = []
+        self.read_calls = []
 
-    async def xadd(self, stream: str, fields: Dict[str, Any]) -> str:
-        self._counter += 1
-        message_id = f"{self._counter}-0"
-        self.streams.setdefault(stream, []).append((message_id, dict(fields)))
-        return message_id
+    async def ensure_consumer_group(self, stream_name: str, group_name: str) -> None:
+        self.ensure_calls.append((stream_name, group_name))
 
-    async def xgroup_create(
+    async def read_tasks(
         self,
-        name: str,
-        groupname: str,
-        id: str = "0",
-        mkstream: bool = True,
-    ) -> bool:
-        key = (name, groupname)
-        if key in self.groups:
-            raise Exception("BUSYGROUP Consumer Group name already exists")
-        self.groups.add(key)
-        if mkstream and name not in self.streams:
-            self.streams[name] = []
-        return True
-
-    async def xreadgroup(
-        self,
-        groupname: str,
-        consumername: str,
-        streams: Dict[str, str],
-        count: int = 10,
-        block: int = 1000,
+        *,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        count: int = 1,
+        block_ms: int = 1000,
     ):
-        results = []
-        for stream_name in streams.keys():
-            entries = self.streams.get(stream_name, [])[:count]
-            formatted = []
-            for message_id, fields in entries:
-                formatted.append((message_id, fields))
-            if formatted:
-                results.append((stream_name, formatted))
-        return results
-
-    async def xack(self, stream: str, groupname: str, message_id: str) -> int:
-        self.acked.append((stream, groupname, message_id))
-        return 1
-
-
-class FakeAgentRuntime:
-    def __init__(self) -> None:
-        self.calls: List[Dict[str, Any]] = []
-
-    async def execute(self, *, context, preferred_skill=None):
-        self.calls.append(
-            {
-                "task_id": context.task_id,
-                "tenant_id": context.tenant_id,
-                "input_payload": context.input_payload,
-                "preferred_skill": preferred_skill,
-                "metadata": context.metadata,
-            }
+        self.read_calls.append(
+            (stream_name, group_name, consumer_name, count, block_ms)
         )
-        return {
-            "success": True,
-            "status": "completed",
-            "output": {
-                "mode": "tool",
-                "tool_result": {
-                    "tool_name": preferred_skill,
-                    "status": "ok",
-                },
-            },
-            "error": None,
-        }
+        return self._messages
+
+    async def ack_task(
+        self,
+        *,
+        stream_name: str,
+        group_name: str,
+        message_id: str,
+    ) -> None:
+        self.acked.append((stream_name, group_name, message_id))
 
 
-@dataclass
-class FakeArtifact:
-    uri: str
-    mime_type: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class FakeGenerationResponse:
-    provider: str
-    model_name: str
-    task_type: str
-    artifacts: List[FakeArtifact]
-    latency_ms: int
-    raw_response: Dict[str, Any]
-
-
-class FakeGenerationService:
-    def __init__(self) -> None:
-        self.calls: List[Dict[str, Any]] = []
-
-    async def generate(self, *, request, context):
-        self.calls.append(
-            {
-                "prompt": request.prompt,
-                "task_type": getattr(request.task_type, "value", request.task_type),
-                "provider": getattr(context.provider, "value", context.provider),
-                "model_ref": context.model_ref,
-                "requires": sorted(getattr(x, "value", x) for x in context.requires),
-                "routing_policy": context.routing_policy,
-            }
-        )
-        return FakeGenerationResponse(
-            provider="mock_image",
-            model_name="mock-image-v1",
-            task_type="image",
-            artifacts=[
-                FakeArtifact(
-                    uri="mock://image/generated-1.png",
-                    mime_type="image/png",
-                    metadata={"prompt": request.prompt},
-                )
-            ],
-            latency_ms=1,
-            raw_response={"mock": True},
-        )
-
-
-def run(awaitable):
-    import asyncio
-    return asyncio.run(awaitable)
-
-
-def make_agent_task() -> TaskEnvelope:
+def build_agent_task() -> TaskEnvelope:
     payload = AgentTaskPayload(
-        agent_id="echo",
-        input="hello worker",
+        prompt="hello agent",
+        model="test-agent-model",
+        metadata={"agent_id": "echo"},
+    )
+    return TaskEnvelope.for_agent(
         tenant_id="tenant-a",
-        user_id="user-a",
+        payload=payload,
+        queue_name="agent_tasks",
         correlation_id="corr-agent-1",
     )
-    task = TaskEnvelope.new_agent_task(payload)
-    task.mark_queued()
-    return task
 
 
-def make_generation_task() -> TaskEnvelope:
+def build_generation_task(modality: str = "image") -> TaskEnvelope:
     payload = GenerationTaskPayload(
-        kind=GenerationTaskKind.IMAGE,
-        prompt="A futuristic AI-PaaS dashboard",
-        provider="mock_image",
-        tenant_id="tenant-a",
+        prompt=f"generate {modality}",
+        model="test-generation-model",
+        modality=modality,
+        metadata={"job": "demo"},
+    )
+    return TaskEnvelope.for_generation(
+        tenant_id="tenant-b",
+        payload=payload,
+        queue_name="generation_tasks",
         correlation_id="corr-gen-1",
     )
-    task = TaskEnvelope.new_generation_task(payload)
-    task.mark_queued()
-    return task
 
 
-def test_agent_worker_processes_task_and_acks():
-    fake_redis = FakeRedisStreamClient()
-    queue = RedisStreamQueueClient(client=fake_redis)
+@pytest.mark.asyncio
+async def test_agent_worker_processes_task_successfully() -> None:
+    task = build_agent_task()
+    queue = FakeQueue(messages=[("msg-1", task)])
     store = InMemoryTaskStore()
-    runtime = FakeAgentRuntime()
+
     worker = AgentWorker(
-        queue_client=queue,
-        task_store=store,
-        agent_runtime=runtime,
-        consumer_name="agent-worker-test",
+        queue=queue,
+        store=store,
+        consumer_name="agent-worker-1",
     )
 
-    task = make_agent_task()
-    message_id = run(queue.publish_task(task))
-    run(worker.ensure_queue())
+    async def fake_execute(task: TaskEnvelope):
+        return {
+            "output": f"processed: {task.payload['prompt']}",
+            "model": task.payload["model"],
+        }
 
-    processed = run(worker.poll_once())
+    worker.execute_task = fake_execute  # type: ignore[method-assign]
 
-    assert processed == 1
-    stored = store.get(task.task_id)
-    assert stored is not None
-    assert stored.status == TaskStatus.SUCCEEDED
-    assert stored.result is not None
-    assert stored.result["output"]["mode"] == "tool"
-    assert len(runtime.calls) == 1
-    assert runtime.calls[0]["preferred_skill"] == "echo"
-    assert runtime.calls[0]["input_payload"]["input"] == "hello worker"
-    assert fake_redis.acked == [
-        (queue.stream_name_for_queue("agent"), queue.consumer_group, message_id)
-    ]
+    await worker.run_once()
+
+    saved = await store.get(task.task_id)
+    assert saved is not None
+    assert saved.status.value == "succeeded"
+    assert saved.result is not None
+    assert saved.result["output"] == "processed: hello agent"
+    assert saved.result["model"] == "test-agent-model"
+
+    assert queue.acked == [("agent_tasks", worker.group_name, "msg-1")]
+    assert queue.ensure_calls == [("agent_tasks", worker.group_name)]
+    assert len(queue.read_calls) == 1
 
 
-def test_generation_worker_processes_task_and_acks():
-    fake_redis = FakeRedisStreamClient()
-    queue = RedisStreamQueueClient(client=fake_redis)
+@pytest.mark.asyncio
+async def test_agent_worker_marks_task_failed_on_execution_error() -> None:
+    task = build_agent_task()
+    queue = FakeQueue(messages=[("msg-2", task)])
     store = InMemoryTaskStore()
-    service = FakeGenerationService()
+
+    worker = AgentWorker(
+        queue=queue,
+        store=store,
+        consumer_name="agent-worker-1",
+    )
+
+    async def fake_execute(_task: TaskEnvelope):
+        raise RuntimeError("agent execution failed")
+
+    worker.execute_task = fake_execute  # type: ignore[method-assign]
+
+    await worker.run_once()
+
+    saved = await store.get(task.task_id)
+    assert saved is not None
+    assert saved.status.value == "failed"
+    assert saved.error is not None
+    assert "agent execution failed" in saved.error
+
+    assert queue.acked == [("agent_tasks", worker.group_name, "msg-2")]
+
+
+@pytest.mark.asyncio
+async def test_generation_worker_processes_image_task_successfully() -> None:
+    task = build_generation_task(modality="image")
+    queue = FakeQueue(messages=[("msg-3", task)])
+    store = InMemoryTaskStore()
+
     worker = GenerationWorker(
-        queue_client=queue,
-        task_store=store,
-        generation_service=service,
-        consumer_name="generation-worker-test",
+        queue=queue,
+        store=store,
+        consumer_name="generation-worker-1",
     )
 
-    task = make_generation_task()
-    message_id = run(queue.publish_task(task))
-    run(worker.ensure_queue())
+    async def fake_execute(task: TaskEnvelope):
+        return {
+            "asset_url": "https://example.com/fake-image.png",
+            "modality": task.payload["modality"],
+        }
 
-    processed = run(worker.poll_once())
+    worker.execute_task = fake_execute  # type: ignore[method-assign]
 
-    assert processed == 1
-    stored = store.get(task.task_id)
-    assert stored is not None
-    assert stored.status == TaskStatus.SUCCEEDED
-    assert stored.result is not None
-    assert stored.result["provider"] == "mock_image"
-    assert stored.result["model"] == "mock-image-v1"
-    assert stored.result["output"]["artifacts"][0]["uri"] == "mock://image/generated-1.png"
-    assert len(service.calls) == 1
-    assert service.calls[0]["task_type"] == "image"
-    assert fake_redis.acked == [
-        (queue.stream_name_for_queue("generation"), queue.consumer_group, message_id)
-    ]
+    await worker.run_once()
+
+    saved = await store.get(task.task_id)
+    assert saved is not None
+    assert saved.status.value == "succeeded"
+    assert saved.result is not None
+    assert saved.result["asset_url"] == "https://example.com/fake-image.png"
+    assert saved.result["modality"] == "image"
+
+    assert queue.acked == [("generation_tasks", worker.group_name, "msg-3")]
+    assert queue.ensure_calls == [("generation_tasks", worker.group_name)]
 
 
-def test_agent_worker_marks_failed_on_exception_and_acks():
-    class FailingAgentRuntime:
-        async def execute(self, *, context, preferred_skill=None):
-            raise RuntimeError("agent execution failed")
-
-    fake_redis = FakeRedisStreamClient()
-    queue = RedisStreamQueueClient(client=fake_redis)
+@pytest.mark.asyncio
+async def test_generation_worker_marks_task_failed_on_execution_error() -> None:
+    task = build_generation_task(modality="video")
+    queue = FakeQueue(messages=[("msg-4", task)])
     store = InMemoryTaskStore()
-    worker = AgentWorker(
-        queue_client=queue,
-        task_store=store,
-        agent_runtime=FailingAgentRuntime(),
-        consumer_name="agent-worker-fail",
+
+    worker = GenerationWorker(
+        queue=queue,
+        store=store,
+        consumer_name="generation-worker-1",
     )
 
-    task = make_agent_task()
-    message_id = run(queue.publish_task(task))
-    run(worker.ensure_queue())
+    async def fake_execute(_task: TaskEnvelope):
+        raise RuntimeError("generation execution failed")
 
-    processed = run(worker.poll_once())
+    worker.execute_task = fake_execute  # type: ignore[method-assign]
 
-    assert processed == 1
-    stored = store.get(task.task_id)
-    assert stored is not None
-    assert stored.status == TaskStatus.FAILED
-    assert stored.retry_count == 1
-    assert stored.error["type"] == "RuntimeError"
-    assert "agent execution failed" in stored.error["message"]
-    assert fake_redis.acked == [
-        (queue.stream_name_for_queue("agent"), queue.consumer_group, message_id)
-    ]
+    await worker.run_once()
+
+    saved = await store.get(task.task_id)
+    assert saved is not None
+    assert saved.status.value == "failed"
+    assert saved.error is not None
+    assert "generation execution failed" in saved.error
+
+    assert queue.acked == [("generation_tasks", worker.group_name, "msg-4")]

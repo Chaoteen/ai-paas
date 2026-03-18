@@ -2,241 +2,269 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from runtime.queue.redis_queue import RedisStreamQueueClient
+from runtime.queue.task_dispatcher import TaskDispatchError, TaskDispatcher
 from runtime.queue.task_models import (
     AgentTaskPayload,
-    GenerationTaskKind,
     GenerationTaskPayload,
     TaskEnvelope,
-    TaskPriority,
 )
-from runtime.queue.task_store import get_task_store
+from runtime.queue.task_store import TaskStore, get_task_store
 
 router = APIRouter(tags=["tasks"])
 
 
 class AgentSubmitRequest(BaseModel):
-    agent_id: str
-    input: Any
+    model_config = ConfigDict(extra="allow")
 
-    tenant_id: Optional[str] = None
-    user_id: Optional[str] = None
-    session_id: Optional[str] = None
-    workflow_id: Optional[str] = None
+    tenant_id: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    system_prompt: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
     correlation_id: Optional[str] = None
-
-    routing_policy: Optional[str] = None
-    required_capability: Optional[str] = None
-    requested_capabilities: list[str] = Field(default_factory=list)
-    allowed_capabilities: list[str] = Field(default_factory=list)
-    secrets_scope: list[str] = Field(default_factory=list)
-    workspace_root: Optional[str] = None
-    preferred_skill: Optional[str] = None
-
-    priority: TaskPriority = TaskPriority.NORMAL
+    idempotency_key: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("tenant_id", "prompt", "model")
+    @classmethod
+    def _validate_required_strings(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("value must be a non-empty string")
+        return value.strip()
 
-class GenerationImageSubmitRequest(BaseModel):
-    prompt: str
-    negative_prompt: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
 
-    tenant_id: Optional[str] = None
-    user_id: Optional[str] = None
-    workflow_id: Optional[str] = None
+class GenerationSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    tenant_id: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    size: Optional[str] = None
+    duration_seconds: Optional[int] = None
     correlation_id: Optional[str] = None
-    routing_policy: Optional[str] = None
-
-    width: Optional[int] = 1024
-    height: Optional[int] = 1024
-    seed: Optional[int] = None
-    count: int = 1
-
-    quality: Optional[str] = None
-    style: Optional[str] = None
-
-    priority: TaskPriority = TaskPriority.NORMAL
+    idempotency_key: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-
-class GenerationVideoSubmitRequest(BaseModel):
-    prompt: str
-    negative_prompt: Optional[str] = None
-    provider: Optional[str] = None
-    model: Optional[str] = None
-
-    tenant_id: Optional[str] = None
-    user_id: Optional[str] = None
-    workflow_id: Optional[str] = None
-    correlation_id: Optional[str] = None
-    routing_policy: Optional[str] = None
-
-    width: Optional[int] = None
-    height: Optional[int] = None
-    duration_seconds: int = 5
-    fps: Optional[int] = None
-    seed: Optional[int] = None
-    count: int = 1
-    resolution: Optional[str] = "720p"
-
-    priority: TaskPriority = TaskPriority.NORMAL
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    @field_validator("tenant_id", "prompt", "model")
+    @classmethod
+    def _validate_required_strings(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("value must be a non-empty string")
+        return value.strip()
 
 
 class TaskSubmitResponse(BaseModel):
-    success: bool
     task_id: str
-    task_type: str
     status: str
     queue_name: str
-    priority: str
+    queue_message_id: str
 
 
-class TaskReadResponse(BaseModel):
-    success: bool
-    task: Dict[str, Any]
+class TaskGetResponse(BaseModel):
+    task_id: str
+    tenant_id: str
+    task_type: str
+    queue_name: str
+    status: str
+    payload: Dict[str, Any]
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: str
+    queued_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    retry_count: int
+    correlation_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
-@router.post("/agent/submit", response_model=TaskSubmitResponse)
-async def submit_agent_task(request: AgentSubmitRequest):
+async def get_dispatch_queue() -> RedisStreamQueueClient:
+    """
+    Queue dependency for task submission endpoints.
+
+    This is module-level typed and importable so tests can monkeypatch
+    gateway.api.tasks.RedisStreamQueueClient directly.
+    """
+    return RedisStreamQueueClient()
+
+
+async def get_task_dispatcher(
+    store: TaskStore = Depends(get_task_store),
+    queue: RedisStreamQueueClient = Depends(get_dispatch_queue),
+) -> TaskDispatcher:
+    return TaskDispatcher(store=store, queue=queue)
+
+
+def _serialize_task(task: TaskEnvelope) -> TaskGetResponse:
+    return TaskGetResponse(
+        task_id=task.task_id,
+        tenant_id=task.tenant_id,
+        task_type=task.task_type.value,
+        queue_name=task.queue_name,
+        status=task.status.value,
+        payload=task.payload,
+        result=task.result,
+        error=task.error,
+        created_at=task.created_at.isoformat(),
+        queued_at=task.queued_at.isoformat() if task.queued_at else None,
+        started_at=task.started_at.isoformat() if task.started_at else None,
+        finished_at=task.finished_at.isoformat() if task.finished_at else None,
+        retry_count=task.retry_count,
+        correlation_id=task.correlation_id,
+        idempotency_key=task.idempotency_key,
+    )
+
+
+@router.post(
+    "/api/v1/agent/submit",
+    response_model=TaskSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_agent_task(
+    request: AgentSubmitRequest,
+    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+) -> TaskSubmitResponse:
     payload = AgentTaskPayload(
-        agent_id=request.agent_id,
-        input=request.input,
+        prompt=request.prompt,
+        model=request.model,
+        system_prompt=request.system_prompt,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        metadata=request.metadata,
+    )
+    task = TaskEnvelope.for_agent(
         tenant_id=request.tenant_id,
-        user_id=request.user_id,
-        session_id=request.session_id,
-        workflow_id=request.workflow_id,
+        payload=payload,
+        queue_name="agent_tasks",
         correlation_id=request.correlation_id,
-        routing_policy=request.routing_policy,
-        required_capability=request.required_capability,
-        requested_capabilities=list(request.requested_capabilities),
-        allowed_capabilities=list(request.allowed_capabilities),
-        secrets_scope=list(request.secrets_scope),
-        workspace_root=request.workspace_root,
-        preferred_skill=request.preferred_skill,
-        metadata=dict(request.metadata),
+        idempotency_key=request.idempotency_key,
     )
 
-    task = TaskEnvelope.new_agent_task(
-        payload,
-        priority=request.priority,
-        queue_name="agent",
-        metadata={"submit_source": "gateway.api.tasks"},
-    )
-    task.mark_queued()
-
-    store = get_task_store()
-    store.put(task)
+    try:
+        message_id = await dispatcher.dispatch(
+            stream_name="agent_tasks",
+            task=task,
+        )
+    except TaskDispatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to submit agent task: {exc}",
+        ) from exc
 
     return TaskSubmitResponse(
-        success=True,
         task_id=task.task_id,
-        task_type=task.task_type.value,
         status=task.status.value,
         queue_name=task.queue_name,
-        priority=task.priority.value,
+        queue_message_id=message_id,
     )
 
 
-@router.post("/generation/image/submit", response_model=TaskSubmitResponse)
-async def submit_generation_image_task(request: GenerationImageSubmitRequest):
+@router.post(
+    "/api/v1/generation/image/submit",
+    response_model=TaskSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_image_generation_task(
+    request: GenerationSubmitRequest,
+    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+) -> TaskSubmitResponse:
     payload = GenerationTaskPayload(
-        kind=GenerationTaskKind.IMAGE,
         prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        provider=request.provider,
         model=request.model,
-        tenant_id=request.tenant_id,
-        user_id=request.user_id,
-        workflow_id=request.workflow_id,
-        correlation_id=request.correlation_id,
-        routing_policy=request.routing_policy,
-        width=request.width,
-        height=request.height,
-        seed=request.seed,
-        count=request.count,
-        quality=request.quality,
-        style=request.style,
-        metadata=dict(request.metadata),
-    )
-
-    task = TaskEnvelope.new_generation_task(
-        payload,
-        priority=request.priority,
-        queue_name="generation",
-        metadata={"submit_source": "gateway.api.tasks"},
-    )
-    task.mark_queued()
-
-    store = get_task_store()
-    store.put(task)
-
-    return TaskSubmitResponse(
-        success=True,
-        task_id=task.task_id,
-        task_type=task.task_type.value,
-        status=task.status.value,
-        queue_name=task.queue_name,
-        priority=task.priority.value,
-    )
-
-
-@router.post("/generation/video/submit", response_model=TaskSubmitResponse)
-async def submit_generation_video_task(request: GenerationVideoSubmitRequest):
-    payload = GenerationTaskPayload(
-        kind=GenerationTaskKind.VIDEO,
-        prompt=request.prompt,
-        negative_prompt=request.negative_prompt,
-        provider=request.provider,
-        model=request.model,
-        tenant_id=request.tenant_id,
-        user_id=request.user_id,
-        workflow_id=request.workflow_id,
-        correlation_id=request.correlation_id,
-        routing_policy=request.routing_policy,
-        width=request.width,
-        height=request.height,
+        modality="image",
+        size=request.size,
         duration_seconds=request.duration_seconds,
-        fps=request.fps,
-        seed=request.seed,
-        count=request.count,
-        resolution=request.resolution,
-        metadata=dict(request.metadata),
+        metadata=request.metadata,
+    )
+    task = TaskEnvelope.for_generation(
+        tenant_id=request.tenant_id,
+        payload=payload,
+        queue_name="generation_tasks",
+        correlation_id=request.correlation_id,
+        idempotency_key=request.idempotency_key,
     )
 
-    task = TaskEnvelope.new_generation_task(
-        payload,
-        priority=request.priority,
-        queue_name="generation",
-        metadata={"submit_source": "gateway.api.tasks"},
-    )
-    task.mark_queued()
-
-    store = get_task_store()
-    store.put(task)
+    try:
+        message_id = await dispatcher.dispatch(
+            stream_name="generation_tasks",
+            task=task,
+        )
+    except TaskDispatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to submit image generation task: {exc}",
+        ) from exc
 
     return TaskSubmitResponse(
-        success=True,
         task_id=task.task_id,
-        task_type=task.task_type.value,
         status=task.status.value,
         queue_name=task.queue_name,
-        priority=task.priority.value,
+        queue_message_id=message_id,
     )
 
 
-@router.get("/tasks/{task_id}", response_model=TaskReadResponse)
-async def get_task(task_id: str):
-    store = get_task_store()
-    task = store.get(task_id)
+@router.post(
+    "/api/v1/generation/video/submit",
+    response_model=TaskSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_video_generation_task(
+    request: GenerationSubmitRequest,
+    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+) -> TaskSubmitResponse:
+    payload = GenerationTaskPayload(
+        prompt=request.prompt,
+        model=request.model,
+        modality="video",
+        size=request.size,
+        duration_seconds=request.duration_seconds,
+        metadata=request.metadata,
+    )
+    task = TaskEnvelope.for_generation(
+        tenant_id=request.tenant_id,
+        payload=payload,
+        queue_name="generation_tasks",
+        correlation_id=request.correlation_id,
+        idempotency_key=request.idempotency_key,
+    )
+
+    try:
+        message_id = await dispatcher.dispatch(
+            stream_name="generation_tasks",
+            task=task,
+        )
+    except TaskDispatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to submit video generation task: {exc}",
+        ) from exc
+
+    return TaskSubmitResponse(
+        task_id=task.task_id,
+        status=task.status.value,
+        queue_name=task.queue_name,
+        queue_message_id=message_id,
+    )
+
+
+@router.get(
+    "/api/v1/tasks/{task_id}",
+    response_model=TaskGetResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def get_task(
+    task_id: str,
+    store: TaskStore = Depends(get_task_store),
+) -> TaskGetResponse:
+    task = await store.get(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-
-    return TaskReadResponse(
-        success=True,
-        task=task.to_dict(),
-    )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task not found: {task_id}",
+        )
+    return _serialize_task(task)
