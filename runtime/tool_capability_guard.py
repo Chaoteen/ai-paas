@@ -52,8 +52,7 @@ class ToolCapabilityDecision:
 
 class ToolCapabilityGuard:
     """
-    Phase 12-B:
-    将 capability enforcement 下沉到 tool 级别。
+    Tool-level capability enforcement.
 
     内置映射规则：
     - echo / template.render: 无敏感 capability
@@ -62,6 +61,8 @@ class ToolCapabilityGuard:
     - fs.read: filesystem_read
     - fs.write: filesystem_write
     - secrets.get: secrets
+    - generation.image: image_generation
+    - generation.video: video_generation
     """
 
     TOOL_CAPABILITY_MAP: Dict[str, List[str]] = {
@@ -72,6 +73,8 @@ class ToolCapabilityGuard:
         "fs.read": ["filesystem_read"],
         "fs.write": ["filesystem_write"],
         "secrets.get": ["secrets"],
+        "generation.image": ["image_generation"],
+        "generation.video": ["video_generation"],
     }
 
     def evaluate(

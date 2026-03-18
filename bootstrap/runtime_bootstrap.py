@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from bootstrap.generation_bootstrap import build_generation_toolset
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -220,7 +221,15 @@ def _build_agent_runtime(
         default_model_ref=os.getenv("AI_PAAS_DEFAULT_MODEL_REF"),
     )
 
-    tool_executor = ToolExecutor()
+    generation_tools = build_generation_toolset(
+        config=None,
+        trace_store=trace_store,
+        runtime_metrics=runtime_metrics,
+    )
+
+    tool_executor = ToolExecutor(
+        generation_tools=generation_tools,
+    )
 
     return AgentRuntime(
         registry=registry,

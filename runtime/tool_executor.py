@@ -6,6 +6,7 @@ from .execution_context import ExecutionContext
 from .sandbox_executor import SandboxExecutor
 from .skill_manifest import SkillManifest
 from .tool_capability_guard import ToolCapabilityGuard
+from .tools.generation_tools import GenerationToolSet
 
 
 class ToolExecutor:
@@ -14,9 +15,11 @@ class ToolExecutor:
         *,
         capability_guard: ToolCapabilityGuard | None = None,
         sandbox_executor: SandboxExecutor | None = None,
+        generation_tools: GenerationToolSet | None = None,
     ) -> None:
         self.capability_guard = capability_guard or ToolCapabilityGuard()
         self.sandbox_executor = sandbox_executor or SandboxExecutor()
+        self.generation_tools = generation_tools
 
     async def execute(
         self,
@@ -121,5 +124,16 @@ class ToolExecutor:
                     "granted_capabilities": granted_capabilities,
                 },
             }
+
+        if tool_name in {"generation.image", "generation.video"}:
+            if self.generation_tools is None:
+                raise RuntimeError("generation tools are not configured")
+            return await self.generation_tools.execute(
+                context=context,
+                skill=skill,
+                tool_name=tool_name,
+                arguments=arguments,
+                granted_capabilities=granted_capabilities,
+            )
 
         raise RuntimeError(f"Unsupported tool: {tool_name}")
