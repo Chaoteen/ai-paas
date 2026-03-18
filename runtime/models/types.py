@@ -10,6 +10,9 @@ class ModelProvider(str, Enum):
     OPENAI = "openai"
     QWEN = "qwen"
     DEEPSEEK = "deepseek"
+    KIMI = "kimi"
+    MINIMAX = "minimax"
+    DOUBAO = "doubao"
 
 
 class ModelCapability(str, Enum):

@@ -4,6 +4,9 @@ import os
 from typing import List
 
 from runtime.models.adapters.deepseek_adapter import DeepSeekAdapter
+from runtime.models.adapters.doubao_adapter import DoubaoAdapter
+from runtime.models.adapters.kimi_adapter import KimiAdapter
+from runtime.models.adapters.minimax_adapter import MiniMaxAdapter
 from runtime.models.adapters.ollama_adapter import OllamaAdapter
 from runtime.models.adapters.openai_adapter import OpenAIAdapter
 from runtime.models.adapters.qwen_adapter import QwenAdapter
@@ -45,68 +48,95 @@ def register_default_models(registry: ModelRegistry) -> None:
         is_default=True,
     )
 
-    openai_endpoint = os.getenv("AI_PAAS_OPENAI_ENDPOINT")
-    openai_model = os.getenv("AI_PAAS_OPENAI_MODEL", "gpt-4o-mini")
-    openai_api_key = os.getenv("AI_PAAS_OPENAI_API_KEY")
-    if openai_endpoint and openai_api_key:
-        registry.register(
-            config=ModelConfig(
-                provider=ModelProvider.OPENAI,
-                model_name=openai_model,
-                endpoint=openai_endpoint,
-                api_key=openai_api_key,
-                capabilities=frozenset(
-                    {
-                        ModelCapability.CHAT,
-                        ModelCapability.TOOLS,
-                        ModelCapability.JSON_MODE,
-                        ModelCapability.STREAMING,
-                    }
-                ),
-                enabled=True,
-                metadata={"source": "default_env"},
-            ),
-            adapter_cls=OpenAIAdapter,
-            aliases=["openai-default"],
-            is_default=True,
-        )
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.OPENAI,
+        adapter_cls=OpenAIAdapter,
+        endpoint_env="AI_PAAS_OPENAI_ENDPOINT",
+        model_env="AI_PAAS_OPENAI_MODEL",
+        api_key_env="AI_PAAS_OPENAI_API_KEY",
+        default_model="gpt-4o-mini",
+        aliases=["openai-default"],
+    )
 
-    qwen_endpoint = os.getenv("AI_PAAS_QWEN_ENDPOINT")
-    qwen_model = os.getenv("AI_PAAS_QWEN_MODEL", "qwen-max")
-    qwen_api_key = os.getenv("AI_PAAS_QWEN_API_KEY")
-    if qwen_endpoint and qwen_api_key:
-        registry.register(
-            config=ModelConfig(
-                provider=ModelProvider.QWEN,
-                model_name=qwen_model,
-                endpoint=qwen_endpoint,
-                api_key=qwen_api_key,
-                capabilities=frozenset(
-                    {
-                        ModelCapability.CHAT,
-                        ModelCapability.TOOLS,
-                        ModelCapability.JSON_MODE,
-                        ModelCapability.STREAMING,
-                    }
-                ),
-                enabled=True,
-                metadata={"source": "default_env"},
-            ),
-            adapter_cls=QwenAdapter,
-            aliases=["qwen-default"],
-            is_default=True,
-        )
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.QWEN,
+        adapter_cls=QwenAdapter,
+        endpoint_env="AI_PAAS_QWEN_ENDPOINT",
+        model_env="AI_PAAS_QWEN_MODEL",
+        api_key_env="AI_PAAS_QWEN_API_KEY",
+        default_model="qwen-max",
+        aliases=["qwen-default"],
+    )
 
-    deepseek_endpoint = os.getenv("AI_PAAS_DEEPSEEK_ENDPOINT")
-    deepseek_model = os.getenv("AI_PAAS_DEEPSEEK_MODEL", "deepseek-chat")
-    deepseek_api_key = os.getenv("AI_PAAS_DEEPSEEK_API_KEY")
-    if deepseek_endpoint and deepseek_api_key:
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.DEEPSEEK,
+        adapter_cls=DeepSeekAdapter,
+        endpoint_env="AI_PAAS_DEEPSEEK_ENDPOINT",
+        model_env="AI_PAAS_DEEPSEEK_MODEL",
+        api_key_env="AI_PAAS_DEEPSEEK_API_KEY",
+        default_model="deepseek-chat",
+        aliases=["deepseek-default"],
+    )
+
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.KIMI,
+        adapter_cls=KimiAdapter,
+        endpoint_env="AI_PAAS_KIMI_ENDPOINT",
+        model_env="AI_PAAS_KIMI_MODEL",
+        api_key_env="AI_PAAS_KIMI_API_KEY",
+        default_model="kimi-k2.5",
+        aliases=["kimi-default"],
+    )
+
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.MINIMAX,
+        adapter_cls=MiniMaxAdapter,
+        endpoint_env="AI_PAAS_MINIMAX_ENDPOINT",
+        model_env="AI_PAAS_MINIMAX_MODEL",
+        api_key_env="AI_PAAS_MINIMAX_API_KEY",
+        default_model="MiniMax-M2.5",
+        aliases=["minimax-default"],
+    )
+
+    _register_openai_family_provider_from_env(
+        registry=registry,
+        provider=ModelProvider.DOUBAO,
+        adapter_cls=DoubaoAdapter,
+        endpoint_env="AI_PAAS_DOUBAO_ENDPOINT",
+        model_env="AI_PAAS_DOUBAO_MODEL",
+        api_key_env="AI_PAAS_DOUBAO_API_KEY",
+        default_model="doubao-seed-1-6",
+        aliases=["doubao-default"],
+    )
+
+
+def _register_openai_family_provider_from_env(
+    *,
+    registry: ModelRegistry,
+    provider: ModelProvider,
+    adapter_cls,
+    endpoint_env: str,
+    model_env: str,
+    api_key_env: str,
+    default_model: str,
+    aliases: list[str],
+) -> None:
+    endpoint = os.getenv(endpoint_env)
+    model_name = os.getenv(model_env, default_model)
+    api_key = os.getenv(api_key_env)
+
+    if endpoint and api_key:
         registry.register(
             config=ModelConfig(
-                provider=ModelProvider.DEEPSEEK,
-                model_name=deepseek_model,
-                endpoint=deepseek_endpoint,
-                api_key=deepseek_api_key,
+                provider=provider,
+                model_name=model_name,
+                endpoint=endpoint,
+                api_key=api_key,
                 capabilities=frozenset(
                     {
                         ModelCapability.CHAT,
@@ -118,8 +148,8 @@ def register_default_models(registry: ModelRegistry) -> None:
                 enabled=True,
                 metadata={"source": "default_env"},
             ),
-            adapter_cls=DeepSeekAdapter,
-            aliases=["deepseek-default"],
+            adapter_cls=adapter_cls,
+            aliases=aliases,
             is_default=True,
         )
 
@@ -133,6 +163,9 @@ def register_model_definitions(
         ModelProvider.OPENAI: OpenAIAdapter,
         ModelProvider.QWEN: QwenAdapter,
         ModelProvider.DEEPSEEK: DeepSeekAdapter,
+        ModelProvider.KIMI: KimiAdapter,
+        ModelProvider.MINIMAX: MiniMaxAdapter,
+        ModelProvider.DOUBAO: DoubaoAdapter,
     }
 
     for item in definitions:
