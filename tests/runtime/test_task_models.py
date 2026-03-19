@@ -1,128 +1,226 @@
 from runtime.queue.task_models import (
     AgentTaskPayload,
-    GenerationTaskKind,
     GenerationTaskPayload,
     TaskEnvelope,
-    TaskPriority,
     TaskStatus,
     TaskType,
 )
 
 
-def test_new_agent_task_defaults():
+def test_agent_task_payload_validates_required_fields() -> None:
     payload = AgentTaskPayload(
-        agent_id="echo",
-        input="hello ai-paas",
-        tenant_id="tenant-a",
-        user_id="user-a",
-        correlation_id="corr-123",
+        prompt="hello world",
+        model="test-agent-model",
+        system_prompt="system",
+        temperature=0.2,
+        max_tokens=256,
+        metadata={"source": "unit-test"},
     )
 
-    task = TaskEnvelope.new_agent_task(payload)
-
-    assert task.task_type == TaskType.AGENT
-    assert task.status == TaskStatus.PENDING
-    assert task.queue_name == "agent"
-    assert task.priority == TaskPriority.NORMAL
-    assert task.tenant_id == "tenant-a"
-    assert task.user_id == "user-a"
-    assert task.correlation_id == "corr-123"
-    assert task.payload.agent_id == "echo"
-    assert task.payload.input == "hello ai-paas"
+    assert payload.prompt == "hello world"
+    assert payload.model == "test-agent-model"
+    assert payload.system_prompt == "system"
+    assert payload.temperature == 0.2
+    assert payload.max_tokens == 256
+    assert payload.metadata["source"] == "unit-test"
 
 
-def test_new_generation_task_defaults():
+def test_generation_task_payload_validates_required_fields() -> None:
     payload = GenerationTaskPayload(
-        kind=GenerationTaskKind.IMAGE,
-        prompt="A futuristic AI-PaaS dashboard",
-        provider="mock_image",
-        tenant_id="tenant-a",
+        prompt="draw a cat",
+        model="test-generation-model",
+        modality="image",
+        size="1024x1024",
+        duration_seconds=5,
+        metadata={"style": "clean"},
     )
 
-    task = TaskEnvelope.new_generation_task(payload)
+    assert payload.prompt == "draw a cat"
+    assert payload.model == "test-generation-model"
+    assert payload.modality == "image"
+    assert payload.size == "1024x1024"
+    assert payload.duration_seconds == 5
+    assert payload.metadata["style"] == "clean"
 
-    assert task.task_type == TaskType.GENERATION
-    assert task.status == TaskStatus.PENDING
-    assert task.queue_name == "generation"
+
+def test_task_envelope_for_agent_builds_created_task() -> None:
+    payload = AgentTaskPayload(
+        prompt="run agent",
+        model="agent-model",
+        metadata={"agent_id": "echo"},
+    )
+
+    task = TaskEnvelope.for_agent(
+        tenant_id="tenant-a",
+        payload=payload,
+        queue_name="agent_tasks",
+        correlation_id="corr-1",
+        idempotency_key="idem-1",
+    )
+
     assert task.tenant_id == "tenant-a"
-    assert task.payload.kind == GenerationTaskKind.IMAGE
-    assert task.payload.provider == "mock_image"
+    assert task.task_type == TaskType.AGENT
+    assert task.queue_name == "agent_tasks"
+    assert task.status == TaskStatus.CREATED
+    assert task.payload["prompt"] == "run agent"
+    assert task.payload["model"] == "agent-model"
+    assert task.payload["metadata"]["agent_id"] == "echo"
+    assert task.correlation_id == "corr-1"
+    assert task.idempotency_key == "idem-1"
+    assert task.result is None
+    assert task.error is None
+    assert task.task_id
 
 
-def test_task_status_transitions():
-    payload = AgentTaskPayload(agent_id="echo", input="hello")
-    task = TaskEnvelope.new_agent_task(payload)
+def test_task_envelope_for_generation_builds_created_task() -> None:
+    payload = GenerationTaskPayload(
+        prompt="make a short video",
+        model="video-model",
+        modality="video",
+        duration_seconds=4,
+        metadata={"job": "demo"},
+    )
+
+    task = TaskEnvelope.for_generation(
+        tenant_id="tenant-b",
+        payload=payload,
+        queue_name="generation_tasks",
+        correlation_id="corr-2",
+        idempotency_key="idem-2",
+    )
+
+    assert task.tenant_id == "tenant-b"
+    assert task.task_type == TaskType.GENERATION
+    assert task.queue_name == "generation_tasks"
+    assert task.status == TaskStatus.CREATED
+    assert task.payload["prompt"] == "make a short video"
+    assert task.payload["model"] == "video-model"
+    assert task.payload["modality"] == "video"
+    assert task.payload["duration_seconds"] == 4
+    assert task.payload["metadata"]["job"] == "demo"
+    assert task.correlation_id == "corr-2"
+    assert task.idempotency_key == "idem-2"
+    assert task.result is None
+    assert task.error is None
+    assert task.task_id
+
+
+def test_task_envelope_lifecycle_transitions() -> None:
+    task = TaskEnvelope.for_agent(
+        tenant_id="tenant-c",
+        payload=AgentTaskPayload(
+            prompt="process me",
+            model="agent-model",
+        ),
+    )
+
+    assert task.status == TaskStatus.CREATED
+    assert task.queued_at is None
+    assert task.started_at is None
+    assert task.finished_at is None
 
     task.mark_queued()
     assert task.status == TaskStatus.QUEUED
     assert task.queued_at is not None
+    assert task.error is None
 
     task.mark_running()
     assert task.status == TaskStatus.RUNNING
     assert task.started_at is not None
-
-    task.mark_succeeded({"ok": True})
-    assert task.status == TaskStatus.SUCCEEDED
-    assert task.result == {"ok": True}
-    assert task.finished_at is not None
     assert task.error is None
 
+    task.mark_succeeded({"output": "done"})
+    assert task.status == TaskStatus.SUCCEEDED
+    assert task.result == {"output": "done"}
+    assert task.error is None
+    assert task.finished_at is not None
 
-def test_task_failure_and_retry():
-    payload = AgentTaskPayload(agent_id="echo", input="hello")
-    task = TaskEnvelope.new_agent_task(payload, max_retries=2)
 
-    assert task.can_retry is True
+def test_task_envelope_mark_failed_from_string() -> None:
+    task = TaskEnvelope.for_generation(
+        tenant_id="tenant-d",
+        payload=GenerationTaskPayload(
+            prompt="generate image",
+            model="image-model",
+            modality="image",
+        ),
+    )
 
+    task.mark_failed("provider timeout")
+
+    assert task.status == TaskStatus.FAILED
+    assert task.error == "provider timeout"
+    assert task.finished_at is not None
+
+
+def test_task_envelope_mark_failed_from_dict() -> None:
+    task = TaskEnvelope.for_agent(
+        tenant_id="tenant-e",
+        payload=AgentTaskPayload(
+            prompt="run",
+            model="agent-model",
+        ),
+    )
+
+    task.mark_failed(
+        {
+            "type": "RuntimeError",
+            "message": "execution failed",
+        }
+    )
+
+    assert task.status == TaskStatus.FAILED
+    assert task.error == "RuntimeError: execution failed"
+    assert task.finished_at is not None
+
+
+def test_task_envelope_increment_retry() -> None:
+    task = TaskEnvelope.for_agent(
+        tenant_id="tenant-f",
+        payload=AgentTaskPayload(
+            prompt="retry me",
+            model="agent-model",
+        ),
+    )
+
+    assert task.retry_count == 0
     task.increment_retry()
-    assert task.retry_count == 1
-    assert task.can_retry is True
-
     task.increment_retry()
     assert task.retry_count == 2
-    assert task.can_retry is False
-
-    task.mark_failed({"type": "RuntimeError", "message": "boom"})
-    assert task.status == TaskStatus.FAILED
-    assert task.error["type"] == "RuntimeError"
 
 
-def test_agent_task_roundtrip_serialization():
-    payload = AgentTaskPayload(
-        agent_id="echo",
-        input={"text": "hello"},
-        tenant_id="tenant-a",
-        metadata={"source": "pytest"},
+def test_task_envelope_roundtrip_serialization() -> None:
+    original = TaskEnvelope.for_generation(
+        tenant_id="tenant-g",
+        payload=GenerationTaskPayload(
+            prompt="draw landscape",
+            model="image-model",
+            modality="image",
+            size="512x512",
+            metadata={"style": "oil"},
+        ),
+        queue_name="generation_tasks",
+        correlation_id="corr-3",
+        idempotency_key="idem-3",
     )
-    task = TaskEnvelope.new_agent_task(payload, metadata={"channel": "gateway"})
 
-    data = task.to_dict()
-    restored = TaskEnvelope.from_dict(data)
+    original.mark_queued()
+    original.mark_running()
+    original.mark_succeeded({"asset_url": "https://example.com/image.png"})
 
-    assert restored.task_id == task.task_id
-    assert restored.task_type == TaskType.AGENT
-    assert restored.payload.agent_id == "echo"
-    assert restored.payload.input == {"text": "hello"}
-    assert restored.metadata["channel"] == "gateway"
-    assert restored.payload.metadata["source"] == "pytest"
+    dumped = original.model_dump(mode="json")
+    restored = TaskEnvelope.model_validate(dumped)
 
-
-def test_generation_task_roundtrip_serialization():
-    payload = GenerationTaskPayload(
-        kind=GenerationTaskKind.VIDEO,
-        prompt="A robot entering a smart factory",
-        provider="seedance",
-        duration_seconds=5,
-        metadata={"source": "pytest"},
-    )
-    task = TaskEnvelope.new_generation_task(payload)
-
-    data = task.to_dict()
-    restored = TaskEnvelope.from_dict(data)
-
+    assert restored.task_id == original.task_id
+    assert restored.tenant_id == "tenant-g"
     assert restored.task_type == TaskType.GENERATION
-    assert restored.payload.kind == GenerationTaskKind.VIDEO
-    assert restored.payload.prompt == "A robot entering a smart factory"
-    assert restored.payload.provider == "seedance"
-    assert restored.payload.duration_seconds == 5
-    assert restored.payload.metadata["source"] == "pytest"
+    assert restored.queue_name == "generation_tasks"
+    assert restored.status == TaskStatus.SUCCEEDED
+    assert restored.payload["prompt"] == "draw landscape"
+    assert restored.payload["model"] == "image-model"
+    assert restored.payload["modality"] == "image"
+    assert restored.payload["size"] == "512x512"
+    assert restored.payload["metadata"]["style"] == "oil"
+    assert restored.result == {"asset_url": "https://example.com/image.png"}
+    assert restored.correlation_id == "corr-3"
+    assert restored.idempotency_key == "idem-3"
