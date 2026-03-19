@@ -30,11 +30,11 @@ class RedisStreamQueueClient:
     """
     Redis Streams queue client.
 
-    Design goals:
-    1. Support dependency injection of an already-built Redis client for tests.
-    2. Keep broker payload shape stable (`{"task": "<json>"}`).
-    3. Raise explicit queue-layer exceptions instead of leaking raw Redis errors.
-    4. Remain compatible with current gateway/worker runtime interfaces.
+    Supports:
+    - publish TaskEnvelope objects
+    - publish raw durable payloads from outbox relay
+    - read task messages back into TaskEnvelope
+    - ack messages
     """
 
     def __init__(
@@ -51,7 +51,7 @@ class RedisStreamQueueClient:
 
         if not self._redis_url:
             try:
-                from persistence.settings import get_settings  # local import
+                from persistence.settings import get_settings
             except Exception as exc:  # pragma: no cover
                 raise RedisQueueConfigurationError(
                     "Redis client not provided and settings loader unavailable"
@@ -60,9 +60,7 @@ class RedisStreamQueueClient:
             settings = get_settings()
             redis_url = getattr(settings, "redis_url", None)
             if not redis_url:
-                raise RedisQueueConfigurationError(
-                    "Redis URL is not configured"
-                )
+                raise RedisQueueConfigurationError("Redis URL is not configured")
             self._redis_url = redis_url
 
         try:
@@ -81,36 +79,52 @@ class RedisStreamQueueClient:
     async def publish_task(self, stream_name: str, task: TaskEnvelope) -> str:
         self._validate_stream_name(stream_name)
         self._validate_task(task)
+        return await self.publish_task_payload(
+            stream_name=stream_name,
+            payload=task.model_dump(mode="json"),
+        )
+
+    async def publish_task_payload(
+        self,
+        *,
+        stream_name: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        """
+        Publish a raw task payload shaped like TaskEnvelope.model_dump(mode="json").
+
+        This method is used by the outbox relay, which republishes already
+        persisted payloads without reconstructing the TaskEnvelope first.
+        """
+        self._validate_stream_name(stream_name)
+        self._validate_payload(payload)
 
         redis_client = await self._get_redis()
 
         try:
-            payload = json.dumps(task.model_dump(mode="json"))
+            raw_payload = json.dumps(payload)
         except Exception as exc:
             raise RedisQueueSerializationError(
-                f"Failed to serialize task {task.task_id}"
+                "Failed to serialize task payload for Redis publish"
             ) from exc
 
         try:
             message_id = await redis_client.xadd(
                 stream_name,
-                {"task": payload},
+                {"task": raw_payload},
             )
         except Exception as exc:
             logger.exception(
                 "Redis XADD failed",
-                extra={
-                    "stream_name": stream_name,
-                    "task_id": task.task_id,
-                },
+                extra={"stream_name": stream_name},
             )
             raise RedisQueueOperationError(
-                f"Failed to publish task {task.task_id} to stream {stream_name}"
+                f"Failed to publish payload to stream {stream_name}"
             ) from exc
 
         if not isinstance(message_id, str) or not message_id.strip():
             raise RedisQueueOperationError(
-                f"Redis returned invalid message id for task {task.task_id}"
+                f"Redis returned invalid message id for stream {stream_name}"
             )
 
         return message_id
@@ -267,6 +281,18 @@ class RedisStreamQueueClient:
         if not task.task_id or not task.task_id.strip():
             raise RedisQueueConfigurationError(
                 "task.task_id must be a non-empty string"
+            )
+
+    @staticmethod
+    def _validate_payload(payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise RedisQueueConfigurationError(
+                f"payload must be dict, got {type(payload)!r}"
+            )
+        task_id = payload.get("task_id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise RedisQueueConfigurationError(
+                "payload.task_id must be a non-empty string"
             )
 
     @staticmethod

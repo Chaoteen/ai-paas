@@ -1,3 +1,18 @@
+"""
+LEGACY GATEWAY COMPATIBILITY ENTRYPOINT
+
+Status:
+- Frozen for formal-release governance
+- Not part of the formal Gateway -> Tasks API -> Task Store/Outbox -> Redis Queue -> Runtime Workers mainline
+- Retained temporarily for historical compatibility review only
+
+Rules:
+- No new features
+- No new production dependencies
+- Do not mount this entrypoint into the formal gateway mainline
+- Candidate for archive/legacy migration after dependency cleanup
+"""
+
 # ai-os/gateway/prompt_execution_gateway.py
 
 import asyncio

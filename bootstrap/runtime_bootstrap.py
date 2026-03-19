@@ -246,18 +246,13 @@ def _build_router_worker_if_possible(
     data_bus: DataBus,
     event_bus: RedisStreamBus | None,
 ):
-    if event_bus is None:
-        return None
+    """
+    Legacy compatibility hook.
 
-    from data_plane.router_worker import RouterWorker
-
-    return RouterWorker(
-        agent_registry=agent_registry,
-        data_bus=data_bus,
-        event_bus=event_bus,
-        consumer_group="router-workers",
-        consumer_name=os.getenv("AI_PAAS_ROUTER_CONSUMER", "router-1"),
-    )
+    Formal runtime bootstrap no longer instantiates legacy data-plane router workers.
+    Router/queue workers must run as dedicated worker processes outside gateway/runtime bootstrap.
+    """
+    return None
 
 
 def _build_agent_worker_if_possible(
@@ -268,21 +263,13 @@ def _build_agent_worker_if_possible(
     state_store: InMemoryRuntimeStateStore,
     idempotency_store: InMemoryIdempotencyStore,
 ):
-    if event_bus is None:
-        return None
+    """
+    Legacy compatibility hook.
 
-    from data_plane.agent_worker import AgentWorker
-
-    return AgentWorker(
-        agent_registry=agent_registry,
-        data_bus=data_bus,
-        event_bus=event_bus,
-        agent_runtime=agent_runtime,
-        state_store=state_store,
-        idempotency_store=idempotency_store,
-        consumer_group="agent-workers",
-        consumer_name=os.getenv("AI_PAAS_AGENT_CONSUMER", "agent-1"),
-    )
+    Formal runtime bootstrap no longer instantiates legacy/embedded agent workers.
+    Queue-driven runtime workers must run as dedicated worker processes outside gateway/runtime bootstrap.
+    """
+    return None
 
 
 async def _build_memory_runtime_state() -> Dict[str, Any]:

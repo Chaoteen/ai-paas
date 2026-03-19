@@ -1,3 +1,18 @@
+"""
+LEGACY COMPATIBILITY MODULE
+
+Status:
+- Frozen for formal-release governance
+- Not part of the formal Gateway -> Tasks API -> Task Store/Outbox -> Redis Queue -> Runtime Workers mainline
+- Retained temporarily for historical reference / migration audit only
+
+Rules:
+- No new features
+- No new production dependencies
+- Do not wire this module into formal bootstrap/startup paths
+- Candidate for archive/legacy migration after dependency cleanup
+"""
+
 #!/usr/bin/env python3
 # ai-os/data_plane/legacy/router_bridge_adapter.py
 

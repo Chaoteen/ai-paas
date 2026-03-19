@@ -35,7 +35,7 @@ async def test_build_runtime_state_memory_mode_includes_agent_runtime(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_build_runtime_state_wires_agent_runtime_into_agent_worker(monkeypatch):
+async def test_build_runtime_state_redis_mode_does_not_embed_legacy_workers(monkeypatch):
     monkeypatch.setenv("AI_PAAS_PERSISTENCE", "memory")
     monkeypatch.setenv("AI_PAAS_EVENT_BUS", "redis")
 
@@ -46,6 +46,5 @@ async def test_build_runtime_state_wires_agent_runtime_into_agent_worker(monkeyp
     state = await build_runtime_state()
 
     assert state["agent_runtime"] is not None
-    assert state["router_worker"] is not None
-    assert state["agent_worker"] is not None
-    assert state["agent_worker"].agent_runtime is state["agent_runtime"]
+    assert state["router_worker"] is None
+    assert state["agent_worker"] is None
