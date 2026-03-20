@@ -1,9 +1,10 @@
-# ai-os/gateway/__init__.py
-
 """
-Gateway 包
+Gateway package
 
-说明：
-- Gateway 一般是对外 HTTP/GRPC 入口（API Gateway / Control Plane Gateway）
-- 如果你把 prompt_execution_gateway.py 放在 control_plane 下，则这个包可空置
+Formal HTTP/API surface lives under:
+- gateway/api/
+- gateway/core/
+
+This package belongs to the formal mainline.
+Do not reintroduce archived legacy gateway entrypoints here.
 """
