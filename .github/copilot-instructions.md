@@ -2,14 +2,18 @@
 
 ## Current formal architecture
 
-This repository has a **formal mainline** and an **archived legacy area**.
+This repository has two zones:
 
-### Formal mainline
-Use and extend these paths:
+- **formal mainline**: the only area that should be extended
+- **archived legacy area**: historical material kept only for reference and governance
+
+## Formal mainline
+
+Use and extend only these areas:
 
 - `gateway/`
-  - Formal HTTP/API entrypoint
-  - Main public contract is:
+  - formal HTTP/API surface
+  - main public endpoints:
     - `POST /api/v1/agent/run`
     - `POST /api/v1/agent/submit`
     - `POST /api/v1/generation/image`
@@ -20,139 +24,74 @@ Use and extend these paths:
     - `GET /api/health`
 
 - `runtime/`
-  - Formal runtime execution layer
-  - Includes:
-    - agent runtime
-    - model adapters
-    - generation service
-    - workers
-    - queue integration
-    - task store / outbox / idempotency / trace / metrics
+  - task models
+  - queue layer
+  - workers
+  - runtime execution services
+
+- `control_plane/`
+  - formal control-plane services such as registry, repositories, and buses that are still used by the mainline
+
+- `data_plane/`
+  - only the surviving formal infrastructure still referenced by the mainline
 
 - `bootstrap/`
-  - Formal startup/bootstrap assembly
+  - formal runtime assembly/bootstrap logic
 
-- `persistence/`
-  - Formal persistence support
+- `webapp/`
+  - formal frontend
+  - start with Vite dev server on port `5173`
 
-- `tests/runtime/`
-- `tests/gateway/`
-- `tests/governance/`
+- root startup scripts
+  - `run_ai_platform_v4.sh`
+  - `start_frontend.sh`
+  - `start_infra.sh`
+  - `start_core_services.sh` when applicable to current mainline flow
 
-### Governance rule
-Anything under `archive/legacy/` is **not** part of the formal production path.
+## Archive policy
+
+Anything under `archive/legacy/` is historical only.
 
 Rules:
 
-- Do not import from `archive/legacy/`
-- Do not restore archived modules into formal paths
-- Do not make new production features on top of archived modules
-- If legacy behavior is only needed for audit/reference, keep it archived
+1. Do not import code from archived paths into the formal mainline.
+2. Do not restore archived files back to formal paths.
+3. Do not treat archived notes, docs, scripts, or snapshots as current architecture.
+4. If historical behavior must be understood, read archive material only as reference, then implement against the formal mainline above.
 
----
+## Working rules for contributors
 
-## Current execution mainline
+When changing the repository:
 
-Formal execution path is:
+1. Prefer `gateway/`, `runtime/`, `control_plane/`, `bootstrap/`, `webapp/`, and active root scripts.
+2. Keep tests under:
+   - `tests/gateway/`
+   - `tests/runtime/`
+   - `tests/governance/`
+3. Keep governance protections passing.
+   - baseline governance command: `pytest tests/governance -q`
+   - baseline runtime/gateway command: `pytest tests/runtime tests/gateway -q`
+4. If a historical artifact is discovered outside `archive/legacy/`, archive it instead of building on top of it.
 
-`Gateway API -> Task Submission Service -> Task Store / Outbox -> Redis Queue -> Runtime Workers`
+## Frontend convention
 
-This is the architecture to preserve and extend.
+The formal frontend is the Vite app in `webapp/`.
 
-### Formal async flow
-- Gateway receives API request
-- Submission service validates and persists task
-- Outbox records event
-- Queue publishes task
-- Runtime worker consumes task
-- Runtime executes skill/model/generation
-- Task status becomes queryable through task API
+- Dev URL: `http://localhost:5173`
+- `start_frontend.sh` should target the Vite webapp flow
+- Do not describe Docker Flowise as the formal frontend
 
-### Formal sync flow
-- Gateway may directly invoke formal runtime services where tests already define that behavior
-- Keep all sync behavior aligned with the runtime contracts already covered by `tests/runtime` and `tests/gateway`
+## Runtime convention
 
----
+The formal runtime is:
 
-## What is legacy now
+Gateway API -> Task Submission Service -> Task Store / Outbox -> Redis Queue -> Runtime Workers
 
-The following historical stacks are archived and must not be treated as active architecture:
+Operationally, the mainline also supports synchronous execution paths exposed by the formal gateway/runtime surface.
 
-- old `agent_core/` runtime stack
-- old `services/server/` service runtime stack
-- old `control_plane/prompt_execution_gateway.py`
-- old `data_plane/router.py`, `router_worker.py`, `agent_worker.py`
-- old `data_plane/adapters/` and `data_plane/handlers/`
-- old compatibility gateway modules
-- old backup scripts and loose operational artifacts
+Mainline work should align to that path and not to historical implementations.
 
-Their copies may still exist under `archive/legacy/` for audit only.
+## If unsure
 
----
-
-## How to extend the platform now
-
-### Adding a new runtime capability
-Prefer extending:
-
-- `runtime/`
-- `gateway/api/`
-- `runtime/models/`
-- `runtime/generation/`
-- `runtime/tools/`
-- `runtime/workers/`
-- `runtime/queue/`
-
-### Adding a new API surface
-- implement under `gateway/api/`
-- wire through formal bootstrap/main entrypoints
-- add tests in `tests/gateway/`
-
-### Adding a new runtime behavior
-- implement in formal runtime modules
-- add tests in `tests/runtime/`
-- keep contracts aligned with task submission and worker execution flow
-
-### Persistence changes
-- use current persistence / db session factory patterns already present in formal modules
-- avoid introducing another historical compatibility path unless explicitly required
-
----
-
-## Test expectations
-
-Before considering work complete, run:
-
-    pytest tests/governance -q
-    pytest tests/runtime tests/gateway -q
-
-Governance must stay green.
-
-Runtime and gateway tests are the required regression baseline.
-
-Notes:
-
-- Some tests intentionally simulate failures and may emit ERROR logs while still passing
-- Passing status matters more than the presence of expected negative-path logs
-
----
-
-## Startup scripts
-
-Current launcher convergence rule:
-
-- `run_ai_platform_v4.sh` is the formal launcher target
-- deprecated wrappers may forward to v4
-- frozen backup scripts belong to archive/governance inventory, not to active architecture design
-
----
-
-## Editing policy for contributors
-
-When making changes:
-
-1. Prefer smallest formal-path change
-2. Do not reintroduce legacy imports
-3. Do not couple new features to archived modules
-4. Update governance tests when archive inventory changes
-5. Keep documentation consistent with the formal mainline above
+If a file appears historical, check whether it is already under `archive/legacy/`.
+If not, prefer governance cleanup rather than compatibility layering.
