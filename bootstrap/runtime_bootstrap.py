@@ -402,3 +402,8 @@ async def build_runtime_state() -> Dict[str, Any]:
     if mode == "postgres":
         return await _build_postgres_runtime_state()
     return await _build_memory_runtime_state()
+
+async def build_outbox_relay_runtime():
+    from bootstrap.outbox_relay_runner import build_outbox_relay
+
+    return await build_outbox_relay()

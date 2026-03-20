@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from runtime.queue.redis_queue import RedisStreamQueueClient
-from runtime.queue.task_dispatcher import TaskDispatchError, TaskDispatcher
 from runtime.queue.task_models import (
     AgentTaskPayload,
     GenerationTaskPayload,
     TaskEnvelope,
 )
-from runtime.queue.task_store import TaskStore, get_task_store
+from runtime.queue.task_store import (
+    TaskStore,
+    get_postgres_session_factory,
+    get_task_store,
+)
+from runtime.queue.task_submission_service import (
+    TaskSubmissionConflictError,
+    TaskSubmissionService,
+    TaskSubmissionServiceError,
+)
 
 router = APIRouter(tags=["tasks"])
 
@@ -62,7 +70,9 @@ class TaskSubmitResponse(BaseModel):
     task_id: str
     status: str
     queue_name: str
-    queue_message_id: str
+    stream_name: str
+    durable: bool = True
+    outbox_event_id: int
 
 
 class TaskGetResponse(BaseModel):
@@ -83,21 +93,9 @@ class TaskGetResponse(BaseModel):
     idempotency_key: Optional[str] = None
 
 
-async def get_dispatch_queue() -> RedisStreamQueueClient:
-    """
-    Queue dependency for task submission endpoints.
-
-    This is module-level typed and importable so tests can monkeypatch
-    gateway.api.tasks.RedisStreamQueueClient directly.
-    """
-    return RedisStreamQueueClient()
-
-
-async def get_task_dispatcher(
-    store: TaskStore = Depends(get_task_store),
-    queue: RedisStreamQueueClient = Depends(get_dispatch_queue),
-) -> TaskDispatcher:
-    return TaskDispatcher(store=store, queue=queue)
+async def get_task_submission_service() -> TaskSubmissionService:
+    session_factory: Callable[[], AsyncSession] = await get_postgres_session_factory()
+    return TaskSubmissionService(session_factory=session_factory)
 
 
 def _serialize_task(task: TaskEnvelope) -> TaskGetResponse:
@@ -121,13 +119,13 @@ def _serialize_task(task: TaskEnvelope) -> TaskGetResponse:
 
 
 @router.post(
-    "/api/v1/agent/submit",
+    "/agent/submit",
     response_model=TaskSubmitResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def submit_agent_task(
     request: AgentSubmitRequest,
-    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+    submission_service: TaskSubmissionService = Depends(get_task_submission_service),
 ) -> TaskSubmitResponse:
     payload = AgentTaskPayload(
         prompt=request.prompt,
@@ -137,6 +135,7 @@ async def submit_agent_task(
         max_tokens=request.max_tokens,
         metadata=request.metadata,
     )
+
     task = TaskEnvelope.for_agent(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -146,32 +145,39 @@ async def submit_agent_task(
     )
 
     try:
-        message_id = await dispatcher.dispatch(
-            stream_name="agent_tasks",
+        result = await submission_service.submit_task(
             task=task,
+            stream_name="agent_tasks",
         )
-    except TaskDispatchError as exc:
+    except TaskSubmissionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Duplicate agent task submission: {exc}",
+        ) from exc
+    except TaskSubmissionServiceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to submit agent task: {exc}",
+            detail=f"Failed to durably submit agent task: {exc}",
         ) from exc
 
     return TaskSubmitResponse(
-        task_id=task.task_id,
-        status=task.status.value,
-        queue_name=task.queue_name,
-        queue_message_id=message_id,
+        task_id=result.task_id,
+        status=result.status,
+        queue_name=result.queue_name,
+        stream_name=result.stream_name,
+        durable=True,
+        outbox_event_id=result.outbox_event_id,
     )
 
 
 @router.post(
-    "/api/v1/generation/image/submit",
+    "/generation/image/submit",
     response_model=TaskSubmitResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def submit_image_generation_task(
     request: GenerationSubmitRequest,
-    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+    submission_service: TaskSubmissionService = Depends(get_task_submission_service),
 ) -> TaskSubmitResponse:
     payload = GenerationTaskPayload(
         prompt=request.prompt,
@@ -181,6 +187,7 @@ async def submit_image_generation_task(
         duration_seconds=request.duration_seconds,
         metadata=request.metadata,
     )
+
     task = TaskEnvelope.for_generation(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -190,32 +197,39 @@ async def submit_image_generation_task(
     )
 
     try:
-        message_id = await dispatcher.dispatch(
-            stream_name="generation_tasks",
+        result = await submission_service.submit_task(
             task=task,
+            stream_name="generation_tasks",
         )
-    except TaskDispatchError as exc:
+    except TaskSubmissionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Duplicate image generation submission: {exc}",
+        ) from exc
+    except TaskSubmissionServiceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to submit image generation task: {exc}",
+            detail=f"Failed to durably submit image generation task: {exc}",
         ) from exc
 
     return TaskSubmitResponse(
-        task_id=task.task_id,
-        status=task.status.value,
-        queue_name=task.queue_name,
-        queue_message_id=message_id,
+        task_id=result.task_id,
+        status=result.status,
+        queue_name=result.queue_name,
+        stream_name=result.stream_name,
+        durable=True,
+        outbox_event_id=result.outbox_event_id,
     )
 
 
 @router.post(
-    "/api/v1/generation/video/submit",
+    "/generation/video/submit",
     response_model=TaskSubmitResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def submit_video_generation_task(
     request: GenerationSubmitRequest,
-    dispatcher: TaskDispatcher = Depends(get_task_dispatcher),
+    submission_service: TaskSubmissionService = Depends(get_task_submission_service),
 ) -> TaskSubmitResponse:
     payload = GenerationTaskPayload(
         prompt=request.prompt,
@@ -225,6 +239,7 @@ async def submit_video_generation_task(
         duration_seconds=request.duration_seconds,
         metadata=request.metadata,
     )
+
     task = TaskEnvelope.for_generation(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -234,26 +249,33 @@ async def submit_video_generation_task(
     )
 
     try:
-        message_id = await dispatcher.dispatch(
-            stream_name="generation_tasks",
+        result = await submission_service.submit_task(
             task=task,
+            stream_name="generation_tasks",
         )
-    except TaskDispatchError as exc:
+    except TaskSubmissionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Duplicate video generation submission: {exc}",
+        ) from exc
+    except TaskSubmissionServiceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to submit video generation task: {exc}",
+            detail=f"Failed to durably submit video generation task: {exc}",
         ) from exc
 
     return TaskSubmitResponse(
-        task_id=task.task_id,
-        status=task.status.value,
-        queue_name=task.queue_name,
-        queue_message_id=message_id,
+        task_id=result.task_id,
+        status=result.status,
+        queue_name=result.queue_name,
+        stream_name=result.stream_name,
+        durable=True,
+        outbox_event_id=result.outbox_event_id,
     )
 
 
 @router.get(
-    "/api/v1/tasks/{task_id}",
+    "/tasks/{task_id}",
     response_model=TaskGetResponse,
     status_code=status.HTTP_200_OK,
 )

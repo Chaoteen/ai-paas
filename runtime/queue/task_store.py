@@ -4,8 +4,12 @@ import asyncio
 import inspect
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Callable
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from persistence.db import Database
+from persistence.settings import PostgresSettings
 from runtime.queue.task_models import TaskEnvelope
 
 
@@ -22,9 +26,6 @@ class TaskStoreConflictError(TaskStoreError):
 
 
 async def maybe_await(value: Any) -> Any:
-    """
-    Await a value only when it is awaitable.
-    """
     if inspect.isawaitable(value):
         return await value
     return value
@@ -57,14 +58,6 @@ class TaskStore(ABC):
 
 
 class InMemoryTaskStore(TaskStore):
-    """
-    In-memory reference implementation.
-
-    Notes:
-    - For tests and local dev only.
-    - Interface-compatible with durable implementations.
-    """
-
     def __init__(self) -> None:
         self._tasks: Dict[str, TaskEnvelope] = {}
         self._lock = asyncio.Lock()
@@ -73,9 +66,7 @@ class InMemoryTaskStore(TaskStore):
         self._validate_task(task)
         async with self._lock:
             if task.task_id in self._tasks:
-                raise TaskStoreConflictError(
-                    f"Task already exists: task_id={task.task_id}"
-                )
+                raise TaskStoreConflictError(f"Task already exists: task_id={task.task_id}")
             self._tasks[task.task_id] = task
             return task
 
@@ -94,9 +85,7 @@ class InMemoryTaskStore(TaskStore):
         self._validate_task(task)
         async with self._lock:
             if task.task_id not in self._tasks:
-                raise TaskStoreNotFoundError(
-                    f"Task not found for update: task_id={task.task_id}"
-                )
+                raise TaskStoreNotFoundError(f"Task not found for update: task_id={task.task_id}")
             self._tasks[task.task_id] = task
             return task
 
@@ -109,9 +98,7 @@ class InMemoryTaskStore(TaskStore):
         self._validate_task_id(task_id)
         async with self._lock:
             if task_id not in self._tasks:
-                raise TaskStoreNotFoundError(
-                    f"Task not found for delete: task_id={task_id}"
-                )
+                raise TaskStoreNotFoundError(f"Task not found for delete: task_id={task_id}")
             del self._tasks[task_id]
 
     @staticmethod
@@ -132,54 +119,70 @@ class InMemoryTaskStore(TaskStore):
 _task_store: Optional[TaskStore] = None
 _task_store_lock = asyncio.Lock()
 
-
-def _resolve_task_store_backend() -> str:
-    backend = os.getenv("TASK_STORE_BACKEND", "memory").strip().lower()
-    if backend not in {"memory", "postgres"}:
-        raise TaskStoreError(
-            f"Unsupported TASK_STORE_BACKEND={backend!r}; expected 'memory' or 'postgres'"
-        )
-    return backend
+_database: Optional[Database] = None
+_database_lock = asyncio.Lock()
 
 
-def _build_postgres_task_store() -> TaskStore:
-    from persistence.db import get_async_session_factory
-    from runtime.queue.postgres_task_store import PostgresTaskStore
+def get_task_store_backend_name() -> str:
+    return os.getenv("TASK_STORE_BACKEND", "memory").strip().lower()
 
-    session_factory = get_async_session_factory()
-    return PostgresTaskStore(session_factory=session_factory)
+
+async def get_database() -> Database:
+    global _database
+
+    if _database is not None:
+        return _database
+
+    async with _database_lock:
+        if _database is None:
+            _database = Database(PostgresSettings())
+
+    return _database
+
+
+async def get_postgres_session_factory() -> Callable[[], AsyncSession]:
+    db = await get_database()
+
+    def _factory() -> AsyncSession:
+        return db._session_factory()  # noqa: SLF001 - controlled runtime factory access
+
+    return _factory
+
+
+async def _build_task_store() -> TaskStore:
+    backend = get_task_store_backend_name()
+
+    if backend == "memory":
+        return InMemoryTaskStore()
+
+    if backend == "postgres":
+        from runtime.queue.postgres_task_store import PostgresTaskStore
+
+        session_factory = await get_postgres_session_factory()
+        return PostgresTaskStore(session_factory=session_factory)
+
+    raise TaskStoreError(
+        f"Unsupported TASK_STORE_BACKEND={backend!r}; expected 'memory' or 'postgres'"
+    )
 
 
 async def get_task_store() -> TaskStore:
-    """
-    Global task store accessor.
-
-    Backend is selected by TASK_STORE_BACKEND:
-    - memory   -> InMemoryTaskStore
-    - postgres -> PostgresTaskStore
-
-    Default remains memory to keep local development and most tests lightweight.
-    """
     global _task_store
+
     if _task_store is not None:
         return _task_store
 
     async with _task_store_lock:
         if _task_store is None:
-            backend = _resolve_task_store_backend()
-            if backend == "postgres":
-                _task_store = _build_postgres_task_store()
-            else:
-                _task_store = InMemoryTaskStore()
-        return _task_store
+            _task_store = await _build_task_store()
+
+    return _task_store
 
 
 async def set_task_store(store: TaskStore) -> None:
     global _task_store
     if not isinstance(store, TaskStore):
-        raise TaskStoreError(
-            f"store must implement TaskStore, got {type(store)!r}"
-        )
+        raise TaskStoreError(f"store must implement TaskStore, got {type(store)!r}")
     async with _task_store_lock:
         _task_store = store
 
