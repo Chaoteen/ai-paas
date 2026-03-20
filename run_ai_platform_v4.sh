@@ -1,4 +1,9 @@
 #!/bin/bash
+# FORMAL PLATFORM ENTRYPOINT
+# Status:
+# - Sole formal full-stack launcher for release governance
+# - Coordinates infra / containers / core services / frontend
+# - All previous run_ai_platform*.sh variants are deprecated wrappers or legacy artifacts
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

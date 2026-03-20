@@ -3,7 +3,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 LEGACY_GATEWAY_FILES = [
-    REPO_ROOT / "gateway" / "prompt_execution_gateway.py",
+    REPO_ROOT / "archive" / "legacy" / "gateway_compat" / "prompt_execution_gateway.py",
 ]
 
 def test_legacy_gateway_modules_have_governance_marker():
@@ -14,4 +14,4 @@ def test_legacy_gateway_modules_have_governance_marker():
         if "LEGACY GATEWAY COMPATIBILITY ENTRYPOINT" not in content:
             missing.append(str(path.relative_to(REPO_ROOT)))
 
-    assert not missing, "legacy gateway modules missing governance marker:\\n" + "\\n".join(missing)
+    assert not missing, "legacy gateway modules missing governance marker:\n" + "\n".join(missing)
