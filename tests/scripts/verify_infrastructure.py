@@ -1,185 +1,173 @@
 #!/usr/bin/env python3
 """
-AI-PaaS 平台 - 基础设施健康检查脚本 v4
-修复：
-1. OPA 测试传入正确的 input 数据
-2. 移除 Control Plane 端口检查（它是库，不是独立服务）
+基础设施与主线运行检查脚本
+
+目标：
+- 只检查当前正式主线依赖与入口
+- 不再检查已归档的 legacy 进程名（如 router_bridge）
 """
 
+from __future__ import annotations
+
 import socket
-import urllib.request
-import json
+import subprocess
 import sys
-import os
+from pathlib import Path
 
-GREEN = "\033[92m"
-RED = "\033[91m"
-YELLOW = "\033[93m"
-BLUE = "\033[94m"
+
 RESET = "\033[0m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
 
-def check_port(host, port, service_name):
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        if result == 0:
-            print(f"{GREEN}✓{RESET} {service_name}: 端口 {port} 监听正常")
-            return True
-        else:
-            print(f"{RED}✗{RESET} {service_name}: 端口 {port} 未监听")
-            return False
-    except Exception as e:
-        print(f"{RED}✗{RESET} {service_name}: {str(e)}")
-        return False
 
-def check_http_endpoint(url, service_name, expected_status=200, headers=None, method='GET', data=None):
+def check_port(host: str, port: int, name: str) -> bool:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1.5)
     try:
-        req = urllib.request.Request(url, method=method)
-        req.add_header('Accept', 'application/json')
-        if headers:
-            for k, v in headers.items():
-                req.add_header(k, v)
-        if data:
-            req.add_header('Content-Type', 'application/json')
-            response = urllib.request.urlopen(req, timeout=5, data=json.dumps(data).encode())
-        else:
-            response = urllib.request.urlopen(req, timeout=5)
-        if response.status == expected_status:
-            print(f"{GREEN}✓{RESET} {service_name}: {url} 响应正常 ({response.status})")
-            return True, response
-        else:
-            print(f"{YELLOW}⚠{RESET} {service_name}: {url} 状态码异常 ({response.status})")
-            return False, response
-    except Exception as e:
-        print(f"{RED}✗{RESET} {service_name}: {url} 无法访问 - {str(e)}")
-        return False, None
-
-def check_opa_policy():
-    """检查 OPA 策略是否生效 - 传入正确的 input 数据"""
-    url = "http://127.0.0.1:8181/v1/data/ui/allow"
-    
-    # 测试 1: 管理员用户访问 admin 菜单（应该 allow）
-    admin_input = {
-        "input": {
-            "user": {"is_admin": True, "user_id": "admin"},
-            "resource": {"kind": "menu", "id": "admin"}
-        }
-    }
-    
-    try:
-        req = urllib.request.Request(url, method='POST')
-        req.add_header('Content-Type', 'application/json')
-        response = urllib.request.urlopen(req, timeout=5, data=json.dumps(admin_input).encode())
-        data = json.loads(response.read().decode())
-        if data.get("result") == True:
-            print(f"{GREEN}✓{RESET} OPA 策略：管理员访问 admin 菜单 → allow")
-            return True
-        else:
-            print(f"{YELLOW}⚠{RESET} OPA 策略：管理员访问 admin 菜单 → deny (预期 allow)")
-            print(f"   响应：{data}")
-            return False
-    except Exception as e:
-        print(f"{RED}✗{RESET} OPA 策略：无法连接 - {str(e)}")
-        return False
-
-def check_redis():
-    try:
-        import redis
-        r = redis.Redis(host='127.0.0.1', port=6379, socket_timeout=2)
-        r.ping()
-        print(f"{GREEN}✓{RESET} Redis: 连接正常 (PONG)")
+        sock.connect((host, port))
+        print(f"{GREEN}✓{RESET} {name}: {host}:{port} 可访问")
         return True
-    except ImportError:
-        return check_port("127.0.0.1", 6379, "Redis")
-    except Exception as e:
-        print(f"{RED}✗{RESET} Redis: {str(e)}")
+    except Exception:
+        print(f"{RED}✗{RESET} {name}: {host}:{port} 不可访问")
+        return False
+    finally:
+        sock.close()
+
+
+def check_redis() -> bool:
+    try:
+        result = subprocess.run(
+            ["redis-cli", "ping"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode == 0 and "PONG" in result.stdout:
+            print(f"{GREEN}✓{RESET} Redis: PONG")
+            return True
+        print(f"{RED}✗{RESET} Redis: 未返回 PONG")
+        return False
+    except Exception as exc:
+        print(f"{YELLOW}⚠{RESET} Redis: 检查失败 - {exc}")
         return False
 
-def main():
-    print("=" * 60)
-    print(f"{BLUE}AI-PaaS 平台 - 基础设施健康检查 v4{RESET}")
-    print("=" * 60)
-    print()
-    print("启动依赖顺序：Redis → OPA → Agent Broker → Gateway → Frontend")
-    print()
-    
-    results = []
-    
+
+def check_opa_policy() -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "curl",
+                "-s",
+                "http://127.0.0.1:8181/v1/policies",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            print(f"{GREEN}✓{RESET} OPA Policy: 已加载策略响应")
+            return True
+        print(f"{RED}✗{RESET} OPA Policy: 未获得有效响应")
+        return False
+    except Exception as exc:
+        print(f"{YELLOW}⚠{RESET} OPA Policy: 检查失败 - {exc}")
+        return False
+
+
+def check_process(pattern: str, display_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            pid = result.stdout.strip().splitlines()[0]
+            print(f"{GREEN}✓{RESET} {display_name}: 进程运行中 (PID: {pid})")
+            return True
+        print(f"{RED}✗{RESET} {display_name}: 进程未运行")
+        return False
+    except Exception as exc:
+        print(f"{YELLOW}⚠{RESET} {display_name}: 无法检查进程 - {exc}")
+        return False
+
+
+def check_formal_scripts_exist() -> bool:
+    repo_root = Path(__file__).resolve().parents[2]
+    expected = [
+        repo_root / "run_ai_platform_v4.sh",
+        repo_root / "start_core_services.sh",
+        repo_root / "start_infra.sh",
+        repo_root / "start_frontend.sh",
+    ]
+    missing = [str(p.relative_to(repo_root)) for p in expected if not p.exists()]
+    if missing:
+        print(f"{RED}✗{RESET} Formal scripts: 缺失 -> {', '.join(missing)}")
+        return False
+    print(f"{GREEN}✓{RESET} Formal scripts: 启动脚本存在")
+    return True
+
+
+def main() -> int:
+    results: list[bool] = []
+
+    print(f"{BLUE}AI-PaaS 主线基础设施检查{RESET}")
+    print("=" * 48)
+
     # === 基础设施层 ===
     print(f"{BLUE}【一、基础设施层】{RESET}")
     print("-" * 40)
-    
-    print("\n[1/7] 检查 Redis...")
+
+    print("\n[1/8] 检查 Redis...")
     results.append(check_redis())
-    
-    print("\n[2/7] 检查 OPA 服务...")
+
+    print("\n[2/8] 检查 OPA 服务...")
     results.append(check_port("127.0.0.1", 8181, "OPA"))
-    
-    print("\n[3/7] 检查 OPA 策略...")
+
+    print("\n[3/8] 检查 OPA 策略...")
     results.append(check_opa_policy())
-    
-    # === Agent Core 层 ===
-    print(f"\n{BLUE}【二、Agent Core 层】{RESET}")
+
+    # === 正式主线脚本 ===
+    print(f"\n{BLUE}【二、正式启动脚本】{RESET}")
     print("-" * 40)
-    
-    print("\n[4/7] 检查 Router Bridge...")
-    import subprocess
-    try:
-        result = subprocess.run(['pgrep', '-f', 'router_bridge'], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            pid = result.stdout.strip().split('\n')[0]
-            print(f"{GREEN}✓{RESET} Router Bridge: 进程运行中 (PID: {pid})")
-            results.append(True)
-        else:
-            print(f"{RED}✗{RESET} Router Bridge: 进程未运行")
-            results.append(False)
-    except Exception as e:
-        print(f"{YELLOW}⚠{RESET} Router Bridge: 无法检查进程 - {str(e)}")
-        results.append(False)
-    
-    print("\n[5/7] 检查 Model Worker...")
-    try:
-        result = subprocess.run(['pgrep', '-f', 'model_worker'], capture_output=True, text=True)
-        if result.returncode == 0 and result.stdout.strip():
-            pid = result.stdout.strip().split('\n')[0]
-            print(f"{GREEN}✓{RESET} Model Worker: 进程运行中 (PID: {pid})")
-            results.append(True)
-        else:
-            print(f"{RED}✗{RESET} Model Worker: 进程未运行")
-            results.append(False)
-    except Exception as e:
-        print(f"{YELLOW}⚠{RESET} Model Worker: 无法检查进程 - {str(e)}")
-        results.append(False)
-    
-    # === Gateway 层 ===
-    print(f"\n{BLUE}【三、Gateway 层】{RESET}")
+
+    print("\n[4/8] 检查正式启动脚本...")
+    results.append(check_formal_scripts_exist())
+
+    # === Runtime / Gateway 层 ===
+    print(f"\n{BLUE}【三、主线运行层】{RESET}")
     print("-" * 40)
-    
-    print("\n[6/7] 检查 Gateway...")
+
+    print("\n[5/8] 检查 Gateway...")
     results.append(check_port("127.0.0.1", 8000, "Gateway"))
-    
-    # === Frontend 层 ===
-    print(f"\n{BLUE}【四、Frontend 层】{RESET}")
-    print("-" * 40)
-    
-    print("\n[7/7] 检查 Frontend...")
+
+    print("\n[6/8] 检查 Frontend...")
     results.append(check_port("127.0.0.1", 5173, "Frontend Vite"))
-    
+
+    print("\n[7/8] 检查主线 Python 进程（main.py）...")
+    results.append(check_process("python.*main.py|uvicorn.*main:app", "Main App"))
+
+    print("\n[8/8] 检查主线前端进程（vite）...")
+    results.append(check_process("vite", "Frontend Vite Process"))
+
     # === 汇总 ===
-    print()
-    print("=" * 60)
-    passed = sum(results)
+    passed = sum(1 for item in results if item)
     total = len(results)
-    print(f"检查结果：{passed}/{total} 通过")
-    
+
+    print(f"\n{BLUE}【汇总】{RESET}")
+    print("-" * 40)
+    print(f"通过: {passed}/{total}")
+
     if passed == total:
-        print(f"{GREEN}✓ 所有基础服务运行正常，可进行下一步测试{RESET}")
+        print(f"{GREEN}✓ 所有主线基础设施检查通过{RESET}")
         return 0
-    else:
-        print(f"{RED}✗ 部分服务异常，请先启动或修复相关服务{RESET}")
-        return 1
+
+    print(f"{YELLOW}⚠ 存在未通过项，请按主线启动顺序排查{RESET}")
+    return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())

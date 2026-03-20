@@ -134,12 +134,13 @@ Model / Skill
 当前 Runtime 相关结构：
 
 gateway
- └─ api
-     ├─ agent_runtime.py
-     ├─ generation.py
-     ├─ tasks.py
-     ├─ ui.py
-     └─ health.py
+ ├─ api
+ │   ├─ agent_runtime.py
+ │   ├─ generation.py
+ │   ├─ tasks.py
+ │   ├─ ui.py
+ │   └─ health.py
+ └─ core
 
 runtime
  ├─ queue
@@ -414,3 +415,26 @@ Generation Engine
 worker orchestration
 task persistence
 connector integration
+
+
+六、当前正式启动口径（重要）
+
+当前仓库正式主线启动口径如下：
+
+基础设施：
+- Redis
+- OPA
+
+后端主线：
+- Gateway / Main App
+- 默认访问地址：http://localhost:8000
+
+前端主线：
+- webapp + Vite
+- 默认访问地址：http://localhost:5173
+
+说明：
+- Flowise 可以作为历史集成组件或外部能力存在
+- 但不再作为当前正式主线前端
+- `start_frontend.sh` 的正式语义应指向 webapp/Vite，而不是 Flowise:3000
+
