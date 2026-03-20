@@ -1,202 +1,151 @@
-import pytest
-from fastapi import FastAPI
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from gateway.api.tasks import (
-    get_dispatch_queue,
     get_task_store,
-    router,
+    get_task_submission_service,
 )
-from runtime.queue.task_store import (
-    InMemoryTaskStore,
-    reset_task_store,
-    set_task_store,
-)
+from gateway.main import app
+from runtime.queue.task_models import TaskEnvelope
+from runtime.queue.task_store import InMemoryTaskStore
 
 
-class DummyQueue:
-    async def publish_task(self, stream_name: str, task) -> str:
-        return f"{stream_name}-msg-1"
+class FakeSubmissionService:
+    def __init__(self, store: InMemoryTaskStore):
+        self.store = store
+        self.outbox_event_id = 0
+
+    async def submit_task(self, *, task: TaskEnvelope, stream_name: str):
+        task.mark_queued()
+        await self.store.put(task)
+        self.outbox_event_id += 1
+        return SimpleNamespace(
+            task_id=task.task_id,
+            status=task.status.value,
+            queue_name=task.queue_name,
+            stream_name=stream_name,
+            outbox_event_id=self.outbox_event_id,
+        )
 
 
-@pytest.mark.asyncio
-async def test_submit_agent_task_and_fetch() -> None:
-    app = FastAPI()
-    app.include_router(router)
-
+def _make_client():
     store = InMemoryTaskStore()
-    await reset_task_store()
-    await set_task_store(store)
+    submission_service = FakeSubmissionService(store)
 
     async def override_store():
         return store
 
-    async def override_queue():
-        return DummyQueue()
+    async def override_submission_service():
+        return submission_service
 
     app.dependency_overrides[get_task_store] = override_store
-    app.dependency_overrides[get_dispatch_queue] = override_queue
-
+    app.dependency_overrides[get_task_submission_service] = override_submission_service
     client = TestClient(app)
+    return client
+
+
+def teardown_function():
+    app.dependency_overrides.clear()
+
+
+def test_submit_agent_task_and_fetch():
+    client = _make_client()
 
     submit_resp = client.post(
         "/api/v1/agent/submit",
         json={
             "tenant_id": "tenant-a",
-            "prompt": "hello",
-            "model": "test-model",
+            "prompt": "hello queue",
+            "model": "qwen",
+            "system_prompt": "You are helpful.",
+            "temperature": 0.7,
+            "max_tokens": 64,
+            "metadata": {"source": "test"},
         },
     )
+
     assert submit_resp.status_code == 202
-
     submit_body = submit_resp.json()
-    task_id = submit_body["task_id"]
-
     assert submit_body["status"] == "queued"
     assert submit_body["queue_name"] == "agent_tasks"
-    assert submit_body["queue_message_id"] == "agent_tasks-msg-1"
+    assert submit_body["stream_name"] == "agent_tasks"
+    assert submit_body["durable"] is True
+    assert isinstance(submit_body["outbox_event_id"], int)
 
-    get_resp = client.get(f"/api/v1/tasks/{task_id}")
-    assert get_resp.status_code == 200
+    task_id = submit_body["task_id"]
 
-    body = get_resp.json()
-    assert body["task_id"] == task_id
-    assert body["tenant_id"] == "tenant-a"
-    assert body["task_type"] == "agent"
-    assert body["queue_name"] == "agent_tasks"
-    assert body["status"] == "queued"
-    assert body["payload"]["prompt"] == "hello"
-    assert body["payload"]["model"] == "test-model"
+    fetch_resp = client.get(f"/api/v1/tasks/{task_id}")
+    assert fetch_resp.status_code == 200
+    fetch_body = fetch_resp.json()
+    assert fetch_body["task_id"] == task_id
+    assert fetch_body["task_type"] == "agent"
+    assert fetch_body["status"] == "queued"
+    assert fetch_body["payload"]["model"] == "qwen"
+    assert fetch_body["payload"]["prompt"] == "hello queue"
 
 
-@pytest.mark.asyncio
-async def test_submit_generation_image_task_and_fetch() -> None:
-    app = FastAPI()
-    app.include_router(router)
-
-    store = InMemoryTaskStore()
-    await reset_task_store()
-    await set_task_store(store)
-
-    async def override_store():
-        return store
-
-    async def override_queue():
-        return DummyQueue()
-
-    app.dependency_overrides[get_task_store] = override_store
-    app.dependency_overrides[get_dispatch_queue] = override_queue
-
-    client = TestClient(app)
+def test_submit_generation_image_task_and_fetch():
+    client = _make_client()
 
     submit_resp = client.post(
         "/api/v1/generation/image/submit",
         json={
-            "tenant_id": "tenant-b",
-            "prompt": "draw a cat",
-            "model": "image-model",
+            "tenant_id": "tenant-a",
+            "prompt": "A futuristic AI-PaaS dashboard",
+            "model": "mock-image",
             "size": "1024x1024",
+            "metadata": {"source": "test"},
         },
     )
+
     assert submit_resp.status_code == 202
-
     submit_body = submit_resp.json()
-    task_id = submit_body["task_id"]
-
     assert submit_body["status"] == "queued"
     assert submit_body["queue_name"] == "generation_tasks"
-    assert submit_body["queue_message_id"] == "generation_tasks-msg-1"
 
-    get_resp = client.get(f"/api/v1/tasks/{task_id}")
-    assert get_resp.status_code == 200
+    task_id = submit_body["task_id"]
 
-    body = get_resp.json()
-    assert body["task_id"] == task_id
-    assert body["tenant_id"] == "tenant-b"
-    assert body["task_type"] == "generation"
-    assert body["queue_name"] == "generation_tasks"
-    assert body["status"] == "queued"
-    assert body["payload"]["prompt"] == "draw a cat"
-    assert body["payload"]["model"] == "image-model"
-    assert body["payload"]["modality"] == "image"
-    assert body["payload"]["size"] == "1024x1024"
+    fetch_resp = client.get(f"/api/v1/tasks/{task_id}")
+    assert fetch_resp.status_code == 200
+    fetch_body = fetch_resp.json()
+    assert fetch_body["task_type"] == "generation"
+    assert fetch_body["payload"]["modality"] == "image"
+    assert fetch_body["payload"]["model"] == "mock-image"
+    assert fetch_body["payload"]["size"] == "1024x1024"
 
 
-@pytest.mark.asyncio
-async def test_submit_generation_video_task_and_fetch() -> None:
-    app = FastAPI()
-    app.include_router(router)
-
-    store = InMemoryTaskStore()
-    await reset_task_store()
-    await set_task_store(store)
-
-    async def override_store():
-        return store
-
-    async def override_queue():
-        return DummyQueue()
-
-    app.dependency_overrides[get_task_store] = override_store
-    app.dependency_overrides[get_dispatch_queue] = override_queue
-
-    client = TestClient(app)
+def test_submit_generation_video_task_and_fetch():
+    client = _make_client()
 
     submit_resp = client.post(
         "/api/v1/generation/video/submit",
         json={
-            "tenant_id": "tenant-c",
-            "prompt": "make a short video",
-            "model": "video-model",
+            "tenant_id": "tenant-a",
+            "prompt": "A robot entering a smart factory",
+            "model": "mock-video",
             "duration_seconds": 5,
+            "metadata": {"source": "test"},
         },
     )
-    assert submit_resp.status_code == 202
 
+    assert submit_resp.status_code == 202
     submit_body = submit_resp.json()
+    assert submit_body["status"] == "queued"
+
     task_id = submit_body["task_id"]
 
-    assert submit_body["status"] == "queued"
-    assert submit_body["queue_name"] == "generation_tasks"
-    assert submit_body["queue_message_id"] == "generation_tasks-msg-1"
-
-    get_resp = client.get(f"/api/v1/tasks/{task_id}")
-    assert get_resp.status_code == 200
-
-    body = get_resp.json()
-    assert body["task_id"] == task_id
-    assert body["tenant_id"] == "tenant-c"
-    assert body["task_type"] == "generation"
-    assert body["queue_name"] == "generation_tasks"
-    assert body["status"] == "queued"
-    assert body["payload"]["prompt"] == "make a short video"
-    assert body["payload"]["model"] == "video-model"
-    assert body["payload"]["modality"] == "video"
-    assert body["payload"]["duration_seconds"] == 5
+    fetch_resp = client.get(f"/api/v1/tasks/{task_id}")
+    assert fetch_resp.status_code == 200
+    fetch_body = fetch_resp.json()
+    assert fetch_body["payload"]["modality"] == "video"
+    assert fetch_body["payload"]["model"] == "mock-video"
+    assert fetch_body["payload"]["duration_seconds"] == 5
 
 
-@pytest.mark.asyncio
-async def test_get_task_not_found() -> None:
-    app = FastAPI()
-    app.include_router(router)
-
-    store = InMemoryTaskStore()
-    await reset_task_store()
-    await set_task_store(store)
-
-    async def override_store():
-        return store
-
-    async def override_queue():
-        return DummyQueue()
-
-    app.dependency_overrides[get_task_store] = override_store
-    app.dependency_overrides[get_dispatch_queue] = override_queue
-
-    client = TestClient(app)
-
+def test_get_task_not_found():
+    client = _make_client()
     response = client.get("/api/v1/tasks/not-found-id")
     assert response.status_code == 404
-
     body = response.json()
     assert "Task not found" in body["detail"]

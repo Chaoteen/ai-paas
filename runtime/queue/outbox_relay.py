@@ -1,83 +1,74 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
-
-from sqlalchemy.ext.asyncio import AsyncSession
+import inspect
+import os
+from typing import Any, Callable, Optional
 
 from persistence.repositories.outbox_repository import OutboxRepository
 from runtime.queue.redis_queue import RedisStreamQueueClient
 
 
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-@dataclass(slots=True)
+@dataclass
 class OutboxRelayResult:
     scanned: int
     published: int
     failed: int
-
-
-class OutboxRelayError(Exception):
-    """Base exception for outbox relay failures."""
+    dead_lettered: int
 
 
 class OutboxRelay:
-    """
-    Relay runtime_outbox_events to Redis Streams.
-
-    Responsibilities:
-    1. Load publishable outbox events from Postgres.
-    2. Mark an event as publishing.
-    3. Publish its payload to Redis Streams.
-    4. Mark the event as published or failed.
-
-    This relay is intentionally decoupled from gateway submit flow.
-    Submit persists to DB; relay handles broker publication.
-    """
-
     def __init__(
         self,
         *,
-        session_factory: Callable[[], AsyncSession],
+        session_factory: Callable[..., Any],
         queue_client: RedisStreamQueueClient,
         retry_backoff_seconds: int = 5,
+        max_publish_attempts: Optional[int] = None,
     ) -> None:
-        if session_factory is None:
-            raise OutboxRelayError("session_factory must not be None")
-        if queue_client is None:
-            raise OutboxRelayError("queue_client must not be None")
-        if retry_backoff_seconds < 0:
-            raise OutboxRelayError("retry_backoff_seconds must be >= 0")
-
         self._session_factory = session_factory
         self._queue_client = queue_client
-        self._retry_backoff_seconds = retry_backoff_seconds
+        self.retry_backoff_seconds = retry_backoff_seconds
+        self.max_publish_attempts = (
+            max_publish_attempts
+            if max_publish_attempts is not None
+            else int(os.getenv("OUTBOX_MAX_PUBLISH_ATTEMPTS", "10"))
+        )
+
+    @property
+    def queue_client(self) -> RedisStreamQueueClient:
+        return self._queue_client
 
     async def run_once(self, *, limit: int = 100) -> OutboxRelayResult:
-        if limit <= 0:
-            raise OutboxRelayError("limit must be > 0")
-
         events = await self._load_publishable_events(limit=limit)
 
         published = 0
         failed = 0
+        dead_lettered = 0
 
         for event in events:
-            ok = await self._process_event(event_id=event.event_id)
-            if ok:
+            publish_attempts = int(getattr(event, "publish_attempts", 0) or 0)
+
+            try:
+                await self._publish_event(event)
                 published += 1
-            else:
-                failed += 1
+            except Exception as exc:
+                became_dead_letter = await self._mark_failed_or_dead_letter(
+                    event_id=event.event_id,
+                    error_text=str(exc),
+                    publish_attempts=publish_attempts,
+                )
+                if became_dead_letter:
+                    dead_lettered += 1
+                else:
+                    failed += 1
 
         return OutboxRelayResult(
             scanned=len(events),
             published=published,
             failed=failed,
+            dead_lettered=dead_lettered,
         )
 
     async def _load_publishable_events(self, *, limit: int):
@@ -85,63 +76,111 @@ class OutboxRelay:
             repo = OutboxRepository(session)
             return await repo.list_publishable_events(limit=limit)
 
-    async def _process_event(self, *, event_id: int) -> bool:
-        event = await self._mark_publishing(event_id=event_id)
-
-        try:
-            await self._queue_client.publish_task_payload(
-                stream_name=event.stream_name,
-                payload=event.payload_json,
-            )
-        except Exception as exc:
-            await self._mark_failed(
-                event_id=event.event_id,
-                error_text=str(exc),
-            )
-            return False
-
-        await self._mark_published(event_id=event.event_id)
-        return True
-
-    async def _mark_publishing(self, *, event_id: int):
+    async def _publish_event(self, event) -> None:
         async with self._session_factory() as session:
             repo = OutboxRepository(session)
-            try:
-                record = await repo.mark_publishing(event_id=event_id)
-                await session.commit()
-                return record
-            except Exception as exc:
-                await session.rollback()
-                raise OutboxRelayError(
-                    f"Failed to mark outbox event publishing: event_id={event_id}"
-                ) from exc
+            await self._call_repo_method(repo, "mark_publishing", event_id=event.event_id)
+            await session.commit()
 
-    async def _mark_published(self, *, event_id: int) -> None:
-        async with self._session_factory() as session:
-            repo = OutboxRepository(session)
-            try:
-                await repo.mark_published(event_id=event_id)
-                await session.commit()
-            except Exception as exc:
-                await session.rollback()
-                raise OutboxRelayError(
-                    f"Failed to mark outbox event published: event_id={event_id}"
-                ) from exc
-
-    async def _mark_failed(self, *, event_id: int, error_text: str) -> None:
-        next_available_at = utcnow() + timedelta(seconds=self._retry_backoff_seconds)
+        await self._call_queue_publish(
+            stream_name=event.stream_name,
+            payload=event.payload_json,
+        )
 
         async with self._session_factory() as session:
             repo = OutboxRepository(session)
-            try:
-                await repo.mark_failed(
+            await self._call_repo_method(repo, "mark_published", event_id=event.event_id)
+            await session.commit()
+
+    async def _mark_failed_or_dead_letter(
+        self,
+        *,
+        event_id: int,
+        error_text: str,
+        publish_attempts: int,
+    ) -> bool:
+        next_attempt = publish_attempts + 1
+
+        async with self._session_factory() as session:
+            repo = OutboxRepository(session)
+
+            if self._is_dead_letter_threshold(next_attempt):
+                await self._call_repo_method(
+                    repo,
+                    "mark_dead_letter",
                     event_id=event_id,
                     error_text=error_text,
-                    next_available_at=next_available_at,
                 )
                 await session.commit()
-            except Exception as exc:
-                await session.rollback()
-                raise OutboxRelayError(
-                    f"Failed to mark outbox event failed: event_id={event_id}"
-                ) from exc
+                return True
+
+            available_at = datetime.now(timezone.utc) + timedelta(
+                seconds=self.retry_backoff_seconds
+            )
+            await self._call_repo_method(
+                repo,
+                "mark_failed",
+                event_id=event_id,
+                error_text=error_text,
+                available_at=available_at,
+            )
+            await session.commit()
+            return False
+
+    def _is_dead_letter_threshold(self, attempts: int) -> bool:
+        return attempts >= self.max_publish_attempts
+
+    async def _call_queue_publish(self, *, stream_name: str, payload: dict) -> Any:
+        method = getattr(self._queue_client, "publish_task_payload", None)
+        if method is None:
+            raise AttributeError("queue_client has no publish_task_payload method")
+
+        try:
+            return await method(stream_name=stream_name, payload=payload)
+        except TypeError:
+            try:
+                return await method(stream_name, payload)
+            except TypeError:
+                return await method(payload)
+
+    async def _call_repo_method(self, repo: Any, method_name: str, **kwargs) -> Any:
+        method = getattr(repo, method_name)
+        try:
+            return await method(**kwargs)
+        except TypeError:
+            pass
+
+        sig = inspect.signature(method)
+        accepted = {
+            name: value
+            for name, value in kwargs.items()
+            if name in sig.parameters
+        }
+
+        if accepted:
+            try:
+                return await method(**accepted)
+            except TypeError:
+                pass
+
+        if len(sig.parameters) == 0:
+            return await method()
+
+        positional_order = [
+            kwargs["event_id"]
+            for name in sig.parameters
+            if name == "event_id" and "event_id" in kwargs
+        ]
+        if positional_order:
+            try:
+                return await method(*positional_order)
+            except TypeError:
+                pass
+
+        if "error_text" in kwargs:
+            try:
+                return await method(kwargs["error_text"])
+            except TypeError:
+                pass
+
+        raise

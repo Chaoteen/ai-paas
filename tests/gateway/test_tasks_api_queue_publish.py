@@ -1,62 +1,104 @@
-import pytest
-from fastapi import FastAPI
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from gateway.api.tasks import (
-    get_dispatch_queue,
     get_task_store,
-    router,
+    get_task_submission_service,
 )
-from runtime.queue.task_store import (
-    InMemoryTaskStore,
-    reset_task_store,
-    set_task_store,
-)
+from gateway.main import app
+from runtime.queue.task_models import TaskEnvelope
+from runtime.queue.task_store import InMemoryTaskStore
 
 
-class DummyQueue:
-    async def publish_task(self, stream_name: str, task) -> str:
-        return "msg-123"
+class RecordingSubmissionService:
+    def __init__(self, store: InMemoryTaskStore):
+        self.store = store
+        self.calls = []
+        self.outbox_event_id = 100
+
+    async def submit_task(self, *, task: TaskEnvelope, stream_name: str):
+        task.mark_queued()
+        await self.store.put(task)
+        self.calls.append(
+            {
+                "task_id": task.task_id,
+                "stream_name": stream_name,
+                "queue_name": task.queue_name,
+                "task_type": task.task_type.value,
+            }
+        )
+        self.outbox_event_id += 1
+        return SimpleNamespace(
+            task_id=task.task_id,
+            status=task.status.value,
+            queue_name=task.queue_name,
+            stream_name=stream_name,
+            outbox_event_id=self.outbox_event_id,
+        )
 
 
-@pytest.mark.asyncio
-async def test_submit_agent_task_returns_queue_message_id() -> None:
-    app = FastAPI()
-    app.include_router(router)
-
+def _make_client():
     store = InMemoryTaskStore()
-    await reset_task_store()
-    await set_task_store(store)
+    submission_service = RecordingSubmissionService(store)
 
     async def override_store():
         return store
 
-    async def override_queue():
-        return DummyQueue()
+    async def override_submission_service():
+        return submission_service
 
     app.dependency_overrides[get_task_store] = override_store
-    app.dependency_overrides[get_dispatch_queue] = override_queue
-
+    app.dependency_overrides[get_task_submission_service] = override_submission_service
     client = TestClient(app)
+    return client, submission_service
+
+
+def teardown_function():
+    app.dependency_overrides.clear()
+
+
+def test_agent_submit_uses_agent_stream_name():
+    client, submission_service = _make_client()
 
     response = client.post(
         "/api/v1/agent/submit",
         json={
-            "tenant_id": "tenant-test",
+            "tenant_id": "tenant-a",
             "prompt": "hello",
-            "model": "test-model",
+            "model": "qwen",
         },
     )
 
     assert response.status_code == 202
     body = response.json()
-
-    assert "task_id" in body
-    assert body["status"] == "queued"
+    assert body["stream_name"] == "agent_tasks"
     assert body["queue_name"] == "agent_tasks"
-    assert body["queue_message_id"] == "msg-123"
+    assert body["durable"] is True
 
-    task = await store.get(body["task_id"])
-    assert task is not None
-    assert task.status.value == "queued"
-    assert task.queue_name == "agent_tasks"
+    assert len(submission_service.calls) == 1
+    assert submission_service.calls[0]["stream_name"] == "agent_tasks"
+    assert submission_service.calls[0]["task_type"] == "agent"
+
+
+def test_generation_submit_uses_generation_stream_name():
+    client, submission_service = _make_client()
+
+    response = client.post(
+        "/api/v1/generation/image/submit",
+        json={
+            "tenant_id": "tenant-a",
+            "prompt": "draw a dashboard",
+            "model": "mock-image",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["stream_name"] == "generation_tasks"
+    assert body["queue_name"] == "generation_tasks"
+    assert body["durable"] is True
+
+    assert len(submission_service.calls) == 1
+    assert submission_service.calls[0]["stream_name"] == "generation_tasks"
+    assert submission_service.calls[0]["task_type"] == "generation"

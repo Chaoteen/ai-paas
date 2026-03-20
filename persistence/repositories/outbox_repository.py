@@ -1,63 +1,54 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from persistence.models import RuntimeOutboxEventRecord
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 class OutboxRepositoryError(Exception):
     """Base exception for outbox repository failures."""
 
 
-class OutboxRepositoryConflictError(OutboxRepositoryError):
-    """Raised when an outbox event already exists and uniqueness is violated."""
+class OutboxEventConflictError(OutboxRepositoryError):
+    """Raised when an outbox event conflicts with an existing unique constraint."""
 
 
-class OutboxRepositoryNotFoundError(OutboxRepositoryError):
+class OutboxEventNotFoundError(OutboxRepositoryError):
     """Raised when an outbox event cannot be found."""
 
 
+# Backward-compatible aliases expected by existing tests / services.
+OutboxRepositoryConflictError = OutboxEventConflictError
+OutboxRepositoryNotFoundError = OutboxEventNotFoundError
+
+
 class OutboxRepository:
-    """
-    Repository for transactional outbox records.
-
-    Responsibilities:
-    - create durable outbox rows inside the same DB transaction as runtime_tasks
-    - load pending publishable events for relay workers
-    - update publish state / attempts / errors
-    """
-
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
     async def create_task_queued_event(
         self,
         *,
-        tenant_id: str,
         task_id: str,
+        tenant_id: str,
         queue_name: str,
         stream_name: str,
-        payload_json: dict[str, Any],
+        payload_json: dict,
     ) -> RuntimeOutboxEventRecord:
-        existing = await self.get_by_unique_key(
-            aggregate_type="task",
-            aggregate_id=task_id,
-            event_type="task.queued",
-        )
+        existing = await self._find_existing_task_queued_event(task_id=task_id)
         if existing is not None:
-            raise OutboxRepositoryConflictError(
-                f"Outbox event already exists for task.queued: task_id={task_id}"
+            raise OutboxEventConflictError(
+                f"Outbox task.queued event already exists for task_id={task_id}"
             )
 
-        record = RuntimeOutboxEventRecord(
+        now = datetime.now(timezone.utc)
+
+        event = RuntimeOutboxEventRecord(
             aggregate_type="task",
             aggregate_id=task_id,
             tenant_id=tenant_id,
@@ -68,108 +59,127 @@ class OutboxRepository:
             status="pending",
             publish_attempts=0,
             last_error_text=None,
-            available_at=utcnow(),
+            available_at=now,
             published_at=None,
-            created_at=utcnow(),
-            updated_at=utcnow(),
+            created_at=now,
+            updated_at=now,
         )
-        self._session.add(record)
-        await self._session.flush()
-        return record
 
-    async def get_by_id(self, event_id: int) -> Optional[RuntimeOutboxEventRecord]:
-        return await self._session.get(RuntimeOutboxEventRecord, event_id)
+        self._session.add(event)
+        try:
+            await self._session.flush()
+        except IntegrityError as exc:
+            raise OutboxEventConflictError(
+                f"Outbox task.queued event already exists for task_id={task_id}"
+            ) from exc
 
-    async def get_by_unique_key(
-        self,
-        *,
-        aggregate_type: str,
-        aggregate_id: str,
-        event_type: str,
-    ) -> Optional[RuntimeOutboxEventRecord]:
-        stmt = select(RuntimeOutboxEventRecord).where(
-            RuntimeOutboxEventRecord.aggregate_type == aggregate_type,
-            RuntimeOutboxEventRecord.aggregate_id == aggregate_id,
-            RuntimeOutboxEventRecord.event_type == event_type,
-        )
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return event
 
-    async def list_publishable_events(
-        self,
-        *,
-        now: Optional[datetime] = None,
-        limit: int = 100,
-    ) -> list[RuntimeOutboxEventRecord]:
-        effective_now = now or utcnow()
+    async def list_publishable_events(self, *, limit: int = 100) -> List[RuntimeOutboxEventRecord]:
+        now = datetime.now(timezone.utc)
 
-        stmt = (
+        stmt: Select[tuple[RuntimeOutboxEventRecord]] = (
             select(RuntimeOutboxEventRecord)
             .where(
                 RuntimeOutboxEventRecord.status.in_(["pending", "failed"]),
-                RuntimeOutboxEventRecord.available_at <= effective_now,
+                RuntimeOutboxEventRecord.available_at <= now,
             )
             .order_by(
                 RuntimeOutboxEventRecord.available_at.asc(),
                 RuntimeOutboxEventRecord.event_id.asc(),
             )
-            .limit(limit)
         )
+
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        records = self._extract_records(result)
+        return records[:limit]
 
-    async def mark_publishing(
-        self,
-        *,
-        event_id: int,
-    ) -> RuntimeOutboxEventRecord:
-        record = await self._session.get(RuntimeOutboxEventRecord, event_id)
-        if record is None:
-            raise OutboxRepositoryNotFoundError(
-                f"Outbox event not found: event_id={event_id}"
-            )
-
-        record.status = "publishing"
-        record.updated_at = utcnow()
+    async def mark_publishing(self, event_id: int) -> RuntimeOutboxEventRecord:
+        event = await self._get_required(event_id)
+        event.status = "publishing"
+        event.updated_at = datetime.now(timezone.utc)
         await self._session.flush()
-        return record
+        return event
 
-    async def mark_published(
-        self,
-        *,
-        event_id: int,
-        published_at: Optional[datetime] = None,
-    ) -> RuntimeOutboxEventRecord:
-        record = await self._session.get(RuntimeOutboxEventRecord, event_id)
-        if record is None:
-            raise OutboxRepositoryNotFoundError(
-                f"Outbox event not found: event_id={event_id}"
-            )
-
-        record.status = "published"
-        record.published_at = published_at or utcnow()
-        record.last_error_text = None
-        record.updated_at = utcnow()
+    async def mark_published(self, event_id: int) -> RuntimeOutboxEventRecord:
+        event = await self._get_required(event_id)
+        now = datetime.now(timezone.utc)
+        event.status = "published"
+        event.published_at = now
+        event.last_error_text = None
+        event.updated_at = now
         await self._session.flush()
-        return record
+        return event
 
     async def mark_failed(
         self,
         *,
         event_id: int,
         error_text: str,
-        next_available_at: Optional[datetime] = None,
+        available_at: Optional[datetime] = None,
     ) -> RuntimeOutboxEventRecord:
-        record = await self._session.get(RuntimeOutboxEventRecord, event_id)
-        if record is None:
-            raise OutboxRepositoryNotFoundError(
-                f"Outbox event not found: event_id={event_id}"
-            )
-
-        record.status = "failed"
-        record.publish_attempts += 1
-        record.last_error_text = error_text
-        record.available_at = next_available_at or utcnow()
-        record.updated_at = utcnow()
+        event = await self._get_required(event_id)
+        now = datetime.now(timezone.utc)
+        event.status = "failed"
+        event.publish_attempts += 1
+        event.last_error_text = error_text
+        event.available_at = available_at or now
+        event.updated_at = now
         await self._session.flush()
-        return record
+        return event
+
+    async def mark_dead_letter(
+        self,
+        *,
+        event_id: int,
+        error_text: str,
+    ) -> RuntimeOutboxEventRecord:
+        event = await self._get_required(event_id)
+        now = datetime.now(timezone.utc)
+        event.status = "dead_letter"
+        event.publish_attempts += 1
+        event.last_error_text = error_text
+        event.updated_at = now
+        await self._session.flush()
+        return event
+
+    async def _find_existing_task_queued_event(
+        self,
+        *,
+        task_id: str,
+    ) -> Optional[RuntimeOutboxEventRecord]:
+        stmt: Select[tuple[RuntimeOutboxEventRecord]] = (
+            select(RuntimeOutboxEventRecord)
+            .where(
+                RuntimeOutboxEventRecord.aggregate_type == "task",
+                RuntimeOutboxEventRecord.aggregate_id == task_id,
+                RuntimeOutboxEventRecord.event_type == "task.queued",
+            )
+        )
+        result = await self._session.execute(stmt)
+        records = self._extract_records(result)
+        return records[0] if records else None
+
+    async def _get_required(self, event_id: int) -> RuntimeOutboxEventRecord:
+        event = await self._session.get(RuntimeOutboxEventRecord, event_id)
+        if event is None:
+            raise OutboxEventNotFoundError(f"Outbox event not found: event_id={event_id}")
+        return event
+
+    def _extract_records(self, result: Any) -> List[Any]:
+        candidate = result
+
+        if hasattr(candidate, "scalars"):
+            candidate = candidate.scalars()
+
+        if hasattr(candidate, "all"):
+            values = candidate.all()
+            return list(values)
+
+        if isinstance(candidate, list):
+            return candidate
+
+        try:
+            return list(candidate)
+        except TypeError:
+            return []
