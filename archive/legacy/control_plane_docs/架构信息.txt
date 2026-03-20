@@ -1,0 +1,5 @@
+control_plane/
+├─ prompt_execution_gateway.py   ← PEP（策略执行点）
+├─ policy_engine.py              ← PDP（策略决策点，核心）
+├─ policy_store.py               ←（未来）策略存储
+├─ quota_engine.py               ←（未来）配额

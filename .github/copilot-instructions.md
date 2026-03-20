@@ -1,159 +1,158 @@
-# AI-PaaS Copilot Instructions
+# AI-PaaS Repository Working Instructions
 
-## Architecture Overview
+## Current formal architecture
 
-This is a **multi-tenant AI PaaS platform** with three-plane architecture:
+This repository has a **formal mainline** and an **archived legacy area**.
 
-### Data Flow Pipeline
-```
-Client Request → Control Plane (Policy Engine) → Data Plane (Dispatcher/Router) → Execution (Agent/Model/PromptFlow)
-```
+### Formal mainline
+Use and extend these paths:
 
-### Three Core Planes
+- `gateway/`
+  - Formal HTTP/API entrypoint
+  - Main public contract is:
+    - `POST /api/v1/agent/run`
+    - `POST /api/v1/agent/submit`
+    - `POST /api/v1/generation/image`
+    - `POST /api/v1/generation/image/submit`
+    - `POST /api/v1/generation/video`
+    - `POST /api/v1/generation/video/submit`
+    - `GET /api/v1/tasks/{task_id}`
+    - `GET /api/health`
 
-1. **Control Plane** (`control_plane/`)
-   - **Policy Engine** (`policy_engine.py`): ABAC-based authorization using `PolicyContext` (tenant/subject/resource/action/environment)
-   - **Prompt Execution Gateway** (`prompt_execution_gateway.py`): Policy enforcement point (PEP)
-   - Freezes execution envelopes with all policy decisions before handing to Data Plane
-   - Never modifies envelopes once created
+- `runtime/`
+  - Formal runtime execution layer
+  - Includes:
+    - agent runtime
+    - model adapters
+    - generation service
+    - workers
+    - queue integration
+    - task store / outbox / idempotency / trace / metrics
 
-2. **Data Plane** (`data_plane/`)
-   - **Dispatcher** (`dispatcher.py`): Routes `ExecutionEnvelope` to handlers (agent/model/promptflow)
-   - **Router** (`router.py`): Splits requests by `target_type` field
-   - Handlers: `agent_handler.py`, `model_handler.py`, `promptflow_handler.py`
-   - **Critical**: Data Plane is read-only—never modifies envelopes
+- `bootstrap/`
+  - Formal startup/bootstrap assembly
 
-3. **Agent Core** (`agent_core/`)
-   - **MessageBus** (`envelope_bus.py`): In-memory pub/sub with request/response support
-   - **MemoryManager** (`memory.py`): Multi-tenant/session-isolated memory (conversation history, task results)
-   - **ReasoningEngine** (`reasoning.py`): Model selection and prompt enhancement
-   - **SkillRegistry** (`skills/base_skills.py`): Extensible skill execution framework
+- `persistence/`
+  - Formal persistence support
 
-### Central Data Structure: ExecutionEnvelope
-All requests flow through frozen `ExecutionEnvelope` (defined in `data_plane/envelope.py`):
-```python
-ExecutionEnvelope(
-    envelope_id, request_id, tenant_id,
-    subject, action, resource, environment,  # ABAC fields
-    target_type, target,  # "agent"/"model"/"promptflow"
-    payload,  # execution input
-    context  # read-only metadata
-)
-```
+- `tests/runtime/`
+- `tests/gateway/`
+- `tests/governance/`
 
-## Service Architecture
+### Governance rule
+Anything under `archive/legacy/` is **not** part of the formal production path.
 
-### gRPC-Based Services (`services/server/`)
-- **AgentService** (`agent_service.py`): Processes agent.task.* topics
-- **ModelService** (`model_service.py`): Integrates with LLMs (DeepSeek, Qwen)
-- **TaskManager** (`task_manager.py`): Manages task lifecycle
-- **AgentRegistry** (`agent_registry.py`): Tracks active agents
+Rules:
 
-### Message Streams (Redis)
-```
-agent.tasks.stream         → Input tasks from clients
-agent.routed.tasks.stream  → After router_bridge dispatch
-agent.result.stream        → Completed task results
-```
+- Do not import from `archive/legacy/`
+- Do not restore archived modules into formal paths
+- Do not make new production features on top of archived modules
+- If legacy behavior is only needed for audit/reference, keep it archived
 
-## Critical Patterns & Conventions
+---
 
-### 1. **Multi-Tenancy Isolation**
-- All operations accept `tenant_id` and `session_id`
-- Memory buckets: `_store[tenant_id][session_id]` (see `agent_core/memory.py`)
-- Never assume default tenant in production code
+## Current execution mainline
 
-### 2. **Message Format Standardization**
-Messages must include StandardMetadata fields:
-```python
-{
-    "request_id": str,
-    "envelope_id": str,
-    "tenant_id": str,
-    "timestamp": str,
-    "correlation_id": str,
-    "session_id": str
-}
-```
+Formal execution path is:
 
-### 3. **Async/Await Convention**
-- All I/O operations are async (database, gRPC, message bus)
-- Use `await self.bus.publish()` not `.publish()`
-- Chain with `asyncio` and `await` at all levels
+`Gateway API -> Task Submission Service -> Task Store / Outbox -> Redis Queue -> Runtime Workers`
 
-### 4. **Error Handling Pattern**
-```python
-try:
-    result = await handler(envelope)
-except Exception as e:
-    logger.exception("descriptive message")
-    return ExecutionResult(envelope_id=..., success=False, error=str(e))
-```
+This is the architecture to preserve and extend.
 
-### 5. **Proto-First Design**
-- All service interfaces defined in `proto/` (agent.proto, envelope.proto, etc.)
-- Generate SDK: `python generate_grpc_sdk.py`
-- Fixes import paths automatically for gRPC modules
-- Import pattern: `from aios_sdk import Agent, Task` (flat structure)
+### Formal async flow
+- Gateway receives API request
+- Submission service validates and persists task
+- Outbox records event
+- Queue publishes task
+- Runtime worker consumes task
+- Runtime executes skill/model/generation
+- Task status becomes queryable through task API
 
-## Developer Workflows
+### Formal sync flow
+- Gateway may directly invoke formal runtime services where tests already define that behavior
+- Keep all sync behavior aligned with the runtime contracts already covered by `tests/runtime` and `tests/gateway`
 
-### Build/Regenerate gRPC SDK
-```bash
-python generate_grpc_sdk.py  # Regenerates _pb2.py/_pb2_grpc.py files
-```
+---
 
-### Start Platform
-```bash
-./run_ai_platform.sh start   # Launches Redis bus, LangGraph, router_bridge, agent system
-```
+## What is legacy now
 
-### Test Services
-```bash
-python aios_sdk/example_usage.py          # SDK usage demo
-python aios_sdk/aios_platform_test.py     # Integration tests
-```
+The following historical stacks are archived and must not be treated as active architecture:
 
-### Check Message Streams
-```bash
-redis-cli keys "*stream*"                 # List all streams
-redis-cli xrange agent.tasks.stream - +   # View task messages
-redis-cli xrange agent.result.stream - +  # View results
-```
+- old `agent_core/` runtime stack
+- old `services/server/` service runtime stack
+- old `control_plane/prompt_execution_gateway.py`
+- old `data_plane/router.py`, `router_worker.py`, `agent_worker.py`
+- old `data_plane/adapters/` and `data_plane/handlers/`
+- old compatibility gateway modules
+- old backup scripts and loose operational artifacts
 
-## Integration Points
+Their copies may still exist under `archive/legacy/` for audit only.
 
-### Adding New Service Handler
-1. Extend `data_plane/handlers/` with `XyzHandler(BaseHandler)`
-2. Register in dispatcher: `dispatcher.register_handler("xyz.action", handler)`
-3. Add proto definition to `proto/xyz.proto`
-4. Regenerate SDK: `python generate_grpc_sdk.py`
+---
 
-### Adding Agent Skills
-1. Create in `agent_core/skills/` extending `BaseSkill`
-2. Register via `SkillRegistry.register(skill_name, handler_func)`
-3. Called by `ReasoningEngine` after task planning
+## How to extend the platform now
 
-### Extending Policy Rules
-1. Add `PolicyRule` instances to `control_plane/policy_engine.py`
-2. Conditions matched using ABAC context paths (e.g., `"tenant.plan_tier"`)
-3. Return `PolicyDecision(allow=True/False, obligations={...})`
+### Adding a new runtime capability
+Prefer extending:
 
-## Key Files Reference
+- `runtime/`
+- `gateway/api/`
+- `runtime/models/`
+- `runtime/generation/`
+- `runtime/tools/`
+- `runtime/workers/`
+- `runtime/queue/`
 
-| File | Purpose |
-|------|---------|
-| `data_plane/dispatcher.py` | Main execution router |
-| `data_plane/envelope.py` | ExecutionEnvelope definition |
-| `agent_core/memory.py` | Tenant/session memory isolation |
-| `agent_core/envelope_bus.py` | Message pub/sub with correlation |
-| `control_plane/policy_engine.py` | ABAC authorization engine |
-| `services/server/agent_service.py` | Agent task processor |
-| `proto/envelope.proto` | StandardMetadata definition |
+### Adding a new API surface
+- implement under `gateway/api/`
+- wire through formal bootstrap/main entrypoints
+- add tests in `tests/gateway/`
 
-## Common Gotchas
+### Adding a new runtime behavior
+- implement in formal runtime modules
+- add tests in `tests/runtime/`
+- keep contracts aligned with task submission and worker execution flow
 
-- **Don't modify ExecutionEnvelope**: It's frozen (immutable)—wrap payload in ExecutionResult instead
-- **Memory scope matters**: Always pass `tenant_id` and `session_id` to avoid cross-tenant leaks
-- **Async all the way**: Sync calls in message handlers cause deadlock
-- **Proto changes require SDK regeneration**: Update .proto files, then run `generate_grpc_sdk.py`
+### Persistence changes
+- use current persistence / db session factory patterns already present in formal modules
+- avoid introducing another historical compatibility path unless explicitly required
+
+---
+
+## Test expectations
+
+Before considering work complete, run:
+
+    pytest tests/governance -q
+    pytest tests/runtime tests/gateway -q
+
+Governance must stay green.
+
+Runtime and gateway tests are the required regression baseline.
+
+Notes:
+
+- Some tests intentionally simulate failures and may emit ERROR logs while still passing
+- Passing status matters more than the presence of expected negative-path logs
+
+---
+
+## Startup scripts
+
+Current launcher convergence rule:
+
+- `run_ai_platform_v4.sh` is the formal launcher target
+- deprecated wrappers may forward to v4
+- frozen backup scripts belong to archive/governance inventory, not to active architecture design
+
+---
+
+## Editing policy for contributors
+
+When making changes:
+
+1. Prefer smallest formal-path change
+2. Do not reintroduce legacy imports
+3. Do not couple new features to archived modules
+4. Update governance tests when archive inventory changes
+5. Keep documentation consistent with the formal mainline above
