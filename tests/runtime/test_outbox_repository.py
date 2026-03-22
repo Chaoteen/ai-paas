@@ -213,7 +213,7 @@ async def test_list_publishable_events_returns_pending_and_failed(
     session = FakeSession()
     repo = OutboxRepository(session)
 
-    rec1 = await repo.create_task_queued_event(
+    await repo.create_task_queued_event(
         tenant_id="tenant-a",
         task_id="task-1",
         queue_name="agent_tasks",
@@ -227,7 +227,6 @@ async def test_list_publishable_events_returns_pending_and_failed(
         stream_name="generation_tasks",
         payload_json={"task_id": "task-2"},
     )
-
     await repo.mark_failed(event_id=rec2.event_id, error_text="temporary broker error")
 
     events = await repo.list_publishable_events(limit=10)
@@ -279,9 +278,35 @@ async def test_mark_failed_increments_attempts(
         event_id=record.event_id,
         error_text="redis unavailable",
     )
+
     assert failed.status == "failed"
     assert failed.publish_attempts == 1
     assert failed.last_error_text == "redis unavailable"
+
+
+@pytest.mark.asyncio
+async def test_mark_dead_letter_increments_attempts_and_sets_terminal_status(
+    patch_outbox_model_and_select,
+):
+    session = FakeSession()
+    repo = OutboxRepository(session)
+
+    record = await repo.create_task_queued_event(
+        tenant_id="tenant-a",
+        task_id="task-1",
+        queue_name="agent_tasks",
+        stream_name="agent_tasks",
+        payload_json={"task_id": "task-1"},
+    )
+
+    dead_lettered = await repo.mark_dead_letter(
+        event_id=record.event_id,
+        error_text="broker permanently unavailable",
+    )
+
+    assert dead_lettered.status == "dead_letter"
+    assert dead_lettered.publish_attempts == 1
+    assert dead_lettered.last_error_text == "broker permanently unavailable"
 
 
 @pytest.mark.asyncio
@@ -299,3 +324,6 @@ async def test_mark_missing_event_raises_not_found(
 
     with pytest.raises(OutboxRepositoryNotFoundError):
         await repo.mark_failed(event_id=999, error_text="missing")
+
+    with pytest.raises(OutboxRepositoryNotFoundError):
+        await repo.mark_dead_letter(event_id=999, error_text="missing")

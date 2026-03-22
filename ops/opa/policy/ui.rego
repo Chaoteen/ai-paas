@@ -1,23 +1,41 @@
 package ui
 
-# default deny
 default allow = false
 
-# ---- Admin-only menus ----
+# ---- Canonical menu ids ----
 admin_only_menu_ids := {"admin", "workflows", "flowise", "promptflow", "langgraph", "opa"}
+user_menu_ids := {"chat", "history", "settings"}
 
-allow if {
+# ---- Input normalization helpers ----
+is_menu if {
+  input.resource.type == "menu"
+}
+
+is_menu if {
   input.resource.kind == "menu"
-  input.resource.id in admin_only_menu_ids
+}
+
+is_admin if {
+  input.subject.is_admin
+}
+
+is_admin if {
   input.user.is_admin
 }
 
-# ---- Normal user menus (explicit allow) ----
-# 你可以按实际菜单逐步补全；先放一个最小集合，避免“新增菜单默认放行”
-user_menu_ids := {"chat", "history", "settings"}
-
-allow if {
-  input.resource.kind == "menu"
-  input.resource.id in user_menu_ids
+menu_id := rid if {
+  rid := input.resource.id
 }
 
+# ---- Admin-only menus ----
+allow if {
+  is_menu
+  menu_id in admin_only_menu_ids
+  is_admin
+}
+
+# ---- Normal user menus ----
+allow if {
+  is_menu
+  menu_id in user_menu_ids
+}

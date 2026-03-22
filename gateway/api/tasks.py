@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from runtime.queue.postgres_task_store import PostgresTaskStore
 from runtime.queue.task_models import (
     AgentTaskPayload,
     GenerationTaskPayload,
@@ -14,7 +15,6 @@ from runtime.queue.task_models import (
 from runtime.queue.task_store import (
     TaskStore,
     get_postgres_session_factory,
-    get_task_store,
 )
 from runtime.queue.task_submission_service import (
     TaskSubmissionConflictError,
@@ -98,6 +98,16 @@ async def get_task_submission_service() -> TaskSubmissionService:
     return TaskSubmissionService(session_factory=session_factory)
 
 
+async def get_task_read_store() -> TaskStore:
+    session_factory: Callable[[], AsyncSession] = await get_postgres_session_factory()
+    return PostgresTaskStore(session_factory=session_factory)
+
+
+# Backward-compatible export for existing tests and call sites.
+async def get_task_store() -> TaskStore:
+    return await get_task_read_store()
+
+
 def _serialize_task(task: TaskEnvelope) -> TaskGetResponse:
     return TaskGetResponse(
         task_id=task.task_id,
@@ -135,7 +145,6 @@ async def submit_agent_task(
         max_tokens=request.max_tokens,
         metadata=request.metadata,
     )
-
     task = TaskEnvelope.for_agent(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -187,7 +196,6 @@ async def submit_image_generation_task(
         duration_seconds=request.duration_seconds,
         metadata=request.metadata,
     )
-
     task = TaskEnvelope.for_generation(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -239,7 +247,6 @@ async def submit_video_generation_task(
         duration_seconds=request.duration_seconds,
         metadata=request.metadata,
     )
-
     task = TaskEnvelope.for_generation(
         tenant_id=request.tenant_id,
         payload=payload,
@@ -281,7 +288,7 @@ async def submit_video_generation_task(
 )
 async def get_task(
     task_id: str,
-    store: TaskStore = Depends(get_task_store),
+    store: TaskStore = Depends(get_task_read_store),
 ) -> TaskGetResponse:
     task = await store.get(task_id)
     if task is None:

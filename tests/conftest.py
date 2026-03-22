@@ -17,27 +17,25 @@ import pytest
 import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from main import app
 from models.base import Base
 from models.database import get_db
-from models.auth import User, Organization, OrganizationMember, APIKey
-from models.project import Project, Environment, Integration
+from models.auth import APIKey, Organization, OrganizationMember, User
+from models.project import Environment, Integration, Project
 from models.agent import Agent
-from models.conversation import Conversation, Message, Feedback
+from models.conversation import Conversation, Feedback, Message
 from models.abac import ABACPolicy, PolicyAssignment, PolicyEvaluationLog
-from models.audit import AuditLog, SystemSetting, FeatureFlag
-from models.billing import UsageRecord, Quota
+from models.audit import AuditLog, FeatureFlag, SystemSetting
+from models.billing import Quota, UsageRecord
 from models.prompt import PromptTemplate, TemplateVersion
-from services.auth_service import hash_password, create_access_token
+from services.auth_service import create_access_token, hash_password
 
 from persistence.db import Database
-from persistence.settings import PostgresSettings
 from persistence.models import Base as PersistenceBase
+from persistence.settings import PostgresSettings
 
-
-# ==================== 环境变量辅助函数 ====================
 
 def _env(name: str, default: str | None = None) -> str:
     v = os.getenv(name, default)
@@ -46,11 +44,8 @@ def _env(name: str, default: str | None = None) -> str:
     return v
 
 
-# ==================== 外部服务测试 Fixture ====================
-
 @pytest.fixture(scope="session")
 def base_url() -> str:
-    """外部服务基础 URL"""
     return os.getenv("AI_PAAS_BASE_URL", "http://localhost:8000")
 
 
@@ -76,42 +71,37 @@ def token_tenant_b_user() -> str:
 
 @pytest.fixture
 def external_client(base_url: str) -> Generator[httpx.Client, None, None]:
-    """外部服务测试客户端（httpx）"""
     with httpx.Client(base_url=base_url, timeout=10.0) as client:
         yield client
 
 
-# ==================== 现有同步测试数据库配置 ====================
-# 这部分给你原来的 ORM / FastAPI / 业务模型测试继续使用
-
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
-    "postgresql+psycopg://postgres:postgres@localhost:5432/ai_paas_test"
+    "postgresql+psycopg://postgres:postgres@localhost:5432/ai_paas_test",
 )
 
 
 @pytest.fixture(scope="session")
 def test_engine():
-    """
-    创建同步测试数据库引擎
-    用于现有 models/* 和 FastAPI TestClient 测试
-    """
     engine = create_engine(
         TEST_DATABASE_URL,
         echo=False,
         future=True,
     )
-    Base.metadata.create_all(bind=engine)
-    yield engine
+
+    # 根修：每次测试会话开始前，强制清空旧 schema，再按当前 metadata 重建。
+    # 仅 create_all() 不会修正已存在表的列类型，容易残留历史 varchar/uuid 不一致问题。
     Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
+    yield engine
+
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
 
 
 @pytest.fixture
 def db_session(test_engine) -> Generator[Session, None, None]:
-    """
-    创建数据库会话 fixture（每个测试自动回滚）
-    用于现有同步 ORM 测试
-    """
     connection = test_engine.connect()
     transaction = connection.begin()
     SessionLocal = sessionmaker(bind=connection, expire_on_commit=False)
@@ -120,23 +110,20 @@ def db_session(test_engine) -> Generator[Session, None, None]:
     try:
         yield session
     finally:
-        session.close()
-        transaction.rollback()
+        try:
+            if session.in_transaction():
+                session.rollback()
+        finally:
+            session.close()
+
+        if transaction.is_active:
+            transaction.rollback()
+
         connection.close()
 
 
-# ==================== PostgreSQL Persistence 异步数据库 Fixture ====================
-# 这部分专门给你新加的 persistence / postgres repository 测试使用
-
 @pytest_asyncio.fixture
 async def pg_async_db():
-    """
-    异步 PostgreSQL 数据库 fixture
-    用于：
-    - PostgresAgentRepository
-    - PostgresControlEventRepository
-    - PostgresDataEventRepository
-    """
     settings = PostgresSettings(
         host=os.getenv("TEST_POSTGRES_HOST", "127.0.0.1"),
         port=int(os.getenv("TEST_POSTGRES_PORT", "5432")),
@@ -147,11 +134,9 @@ async def pg_async_db():
     )
     database = Database(settings)
 
-    # 先自动建表，确保 persistence.models 里的表都存在
     async with database.engine.begin() as conn:
         await conn.run_sync(PersistenceBase.metadata.create_all)
 
-    # 再清空表，保证每个测试干净
     async with database.session() as session:
         for table_name in ["data_events", "control_events", "agents"]:
             await session.execute(
@@ -162,13 +147,10 @@ async def pg_async_db():
     await database.dispose()
 
 
-# ==================== 测试数据 Fixture ====================
-
 @pytest.fixture
 def test_user(db_session: Session) -> User:
-    """创建测试用户"""
     user = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="test@example.com",
         username="testuser",
         password_hash="$2b$12$test_hash_placeholder",
@@ -177,7 +159,7 @@ def test_user(db_session: Session) -> User:
         department="Engineering",
         level="L5",
         auth_level="basic",
-        abac_attributes={"clearance": "internal"}
+        abac_attributes={"clearance": "internal"},
     )
     db_session.add(user)
     db_session.commit()
@@ -187,9 +169,8 @@ def test_user(db_session: Session) -> User:
 
 @pytest.fixture
 def test_organization(db_session: Session, test_user: User) -> Organization:
-    """创建测试组织"""
     org = Organization(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         name="Test Organization",
         slug="test-org",
         owner_id=test_user.id,
@@ -197,7 +178,7 @@ def test_organization(db_session: Session, test_user: User) -> Organization:
         sensitivity_default="internal",
         compliance_tags=["SOC2"],
         allowed_locations=["US", "CN"],
-        data_residency="US"
+        data_residency="US",
     )
     db_session.add(org)
     db_session.commit()
@@ -211,9 +192,8 @@ def test_project(
     test_organization: Organization,
     test_user: User,
 ) -> Project:
-    """创建测试项目"""
     project = Project(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         organization_id=test_organization.id,
         name="Test Project",
         slug="test-project",
@@ -228,10 +208,10 @@ def test_project(
 
 @pytest.fixture
 def test_agent(db_session: Session, test_project: Project, test_user: User) -> Agent:
-    """创建测试 Agent"""
     agent = Agent(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         project_id=test_project.id,
+        organization_id=test_project.organization_id,
         name="Test Agent",
         slug="test-agent",
         agent_type="chat",
@@ -249,9 +229,8 @@ def test_agent(db_session: Session, test_project: Project, test_user: User) -> A
 
 @pytest.fixture
 def test_abac_policy(db_session: Session) -> ABACPolicy:
-    """创建测试 ABAC 策略"""
     policy = ABACPolicy(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         name="Test Access Policy",
         description="Test policy for development",
         effect="allow",
@@ -260,7 +239,7 @@ def test_abac_policy(db_session: Session) -> ABACPolicy:
         environment_conditions={},
         actions=["read", "write"],
         priority=1,
-        is_active=True
+        is_active=True,
     )
     db_session.add(policy)
     db_session.commit()
@@ -268,17 +247,10 @@ def test_abac_policy(db_session: Session) -> ABACPolicy:
     return policy
 
 
-# ==================== FastAPI 本地 API 测试 Fixture ====================
-
 @pytest.fixture
 def api_client(db_session: Session) -> Generator[TestClient, None, None]:
-    """
-    FastAPI 本地 API 测试客户端
-    使用同步测试数据库会话，覆盖 get_db
-    """
-    # 创建测试用户和组织
     user = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="apitest@example.com",
         username="apitestuser",
         password_hash=hash_password("apitest123"),
@@ -287,13 +259,13 @@ def api_client(db_session: Session) -> Generator[TestClient, None, None]:
         department="Engineering",
         level="L5",
         auth_level="basic",
-        abac_attributes={"clearance": "internal"}
+        abac_attributes={"clearance": "internal"},
     )
     db_session.add(user)
     db_session.flush()
 
     org = Organization(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         name="API Test Organization",
         slug="api-test-org",
         owner_id=user.id,
@@ -301,16 +273,16 @@ def api_client(db_session: Session) -> Generator[TestClient, None, None]:
         sensitivity_default="internal",
         compliance_tags=["SOC2"],
         allowed_locations=["US", "CN"],
-        data_residency="US"
+        data_residency="US",
     )
     db_session.add(org)
     db_session.flush()
 
     member = OrganizationMember(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         organization_id=org.id,
         user_id=user.id,
-        role="owner"
+        role="owner",
     )
     db_session.add(member)
     db_session.commit()
@@ -332,18 +304,14 @@ def api_client(db_session: Session) -> Generator[TestClient, None, None]:
 @pytest.fixture
 def authenticated_api_client(
     api_client: TestClient,
-    db_session: Session
+    db_session: Session,
 ) -> tuple[TestClient, User, Organization]:
-    """
-    已认证的 API 测试客户端
-    返回：(client, user, organization)
-    """
     login_response = api_client.post(
         "/api/v1/auth/login/json",
         json={
             "email": "apitest@example.com",
-            "password": "apitest123"
-        }
+            "password": "apitest123",
+        },
     )
 
     if login_response.status_code == 200:
@@ -361,13 +329,10 @@ def authenticated_api_client(
 @pytest.fixture
 def admin_api_client(
     api_client: TestClient,
-    db_session: Session
+    db_session: Session,
 ) -> tuple[TestClient, User, Organization]:
-    """
-    管理员 API 测试客户端
-    """
     admin_user = User(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         email="admin@example.com",
         username="adminuser",
         password_hash=hash_password("admin123"),
@@ -376,13 +341,13 @@ def admin_api_client(
         department="Engineering",
         level="L7",
         auth_level="high",
-        abac_attributes={"clearance": "confidential"}
+        abac_attributes={"clearance": "confidential"},
     )
     db_session.add(admin_user)
     db_session.flush()
 
     admin_org = Organization(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         name="Admin Test Organization",
         slug="admin-test-org",
         owner_id=admin_user.id,
@@ -390,16 +355,16 @@ def admin_api_client(
         sensitivity_default="confidential",
         compliance_tags=["SOC2", "ISO27001"],
         allowed_locations=["US", "CN", "EU"],
-        data_residency="US"
+        data_residency="US",
     )
     db_session.add(admin_org)
     db_session.flush()
 
     admin_member = OrganizationMember(
-        id=str(uuid.uuid4()),
+        id=uuid.uuid4(),
         organization_id=admin_org.id,
         user_id=admin_user.id,
-        role="owner"
+        role="owner",
     )
     db_session.add(admin_member)
     db_session.commit()
@@ -408,8 +373,8 @@ def admin_api_client(
         "/api/v1/auth/login/json",
         json={
             "email": "admin@example.com",
-            "password": "admin123"
-        }
+            "password": "admin123",
+        },
     )
 
     if login_response.status_code == 200:
@@ -419,11 +384,8 @@ def admin_api_client(
     return api_client, admin_user, admin_org
 
 
-# ==================== 测试辅助 Fixture ====================
-
 @pytest.fixture
 def test_config() -> dict:
-    """测试配置"""
     return {
         "test_email": "test@example.com",
         "test_password": "testpassword123",
@@ -436,10 +398,9 @@ def test_config() -> dict:
 
 @pytest.fixture
 def sample_jwt_token(test_user: User) -> str:
-    """生成示例 JWT 令牌"""
     return create_access_token(
         subject=test_user.email,
         user_id=test_user.id,
         role=test_user.role,
-        expires_delta=timedelta(minutes=60)
+        expires_delta=timedelta(minutes=60),
     )
