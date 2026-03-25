@@ -9,8 +9,9 @@ from runtime.queue.redis_queue import RedisStreamQueueClient
 from runtime.queue.task_store import get_task_store
 from runtime.workers.agent_worker import AgentWorker
 from runtime.workers.generation_worker import GenerationWorker
+from runtime.workers.workflow_worker import WorkflowWorker
 
-WorkerKind = Literal["agent", "generation"]
+WorkerKind = Literal["agent", "generation", "workflow"]
 
 
 def _get_redis_url() -> str:
@@ -22,9 +23,9 @@ def _get_redis_url() -> str:
 
 def _get_worker_kind() -> WorkerKind:
     kind = os.getenv("AI_PAAS_WORKER_KIND", "agent").strip().lower()
-    if kind not in {"agent", "generation"}:
+    if kind not in {"agent", "generation", "workflow"}:
         raise RuntimeError(
-            "AI_PAAS_WORKER_KIND must be 'agent' or 'generation'"
+            "AI_PAAS_WORKER_KIND must be 'agent', 'generation', or 'workflow'"
         )
     return kind  # type: ignore[return-value]
 
@@ -42,7 +43,14 @@ def _build_worker(kind: WorkerKind, queue_client, store, consumer_name: str):
             consumer_name=consumer_name,
         )
 
-    return GenerationWorker(
+    if kind == "generation":
+        return GenerationWorker(
+            queue=queue_client,
+            store=store,
+            consumer_name=consumer_name,
+        )
+
+    return WorkflowWorker(
         queue=queue_client,
         store=store,
         consumer_name=consumer_name,

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import DateTime, Index, Integer, Text, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -37,6 +37,7 @@ class RuntimeTaskRecord(Base):
     error_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     correlation_id: Mapped[Optional[str]] = mapped_column(nullable=True, index=True)
     idempotency_key: Mapped[Optional[str]] = mapped_column(nullable=True)
 
@@ -88,7 +89,6 @@ class RuntimeOutboxEventRecord(Base):
 
     Each row represents a domain event that must be published after the
     enclosing DB transaction commits successfully.
-
     In current scope, only task.queued is supported.
     """
 
@@ -99,15 +99,12 @@ class RuntimeOutboxEventRecord(Base):
         primary_key=True,
         autoincrement=True,
     )
-
     aggregate_type: Mapped[str] = mapped_column(nullable=False)
     aggregate_id: Mapped[str] = mapped_column(nullable=False, index=True)
     tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
-
     event_type: Mapped[str] = mapped_column(nullable=False)
     queue_name: Mapped[str] = mapped_column(nullable=False)
     stream_name: Mapped[str] = mapped_column(nullable=False)
-
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 
     status: Mapped[str] = mapped_column(nullable=False, default="pending")
@@ -154,6 +151,293 @@ class RuntimeOutboxEventRecord(Base):
         ),
         Index(
             "idx_runtime_outbox_created_at",
+            "created_at",
+        ),
+    )
+
+
+class WorkflowDefinitionRecord(Base):
+    """
+    Registered workflow definition and versioned schema source of truth.
+    """
+
+    __tablename__ = "workflow_definitions"
+
+    workflow_key: Mapped[str] = mapped_column(primary_key=True)
+    workflow_version: Mapped[str] = mapped_column(primary_key=True)
+
+    display_name: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(nullable=False, index=True)
+
+    schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    input_schema_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    output_schema_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    policies_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    governance_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    checksum: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_workflow_definitions_status",
+            "status",
+        ),
+        Index(
+            "idx_workflow_definitions_created_at",
+            "created_at",
+        ),
+    )
+
+
+class WorkflowExecutionRecord(Base):
+    """
+    Durable workflow execution instance linked to runtime_tasks.
+    """
+
+    __tablename__ = "workflow_executions"
+
+    workflow_execution_id: Mapped[str] = mapped_column(primary_key=True)
+    task_id: Mapped[str] = mapped_column(nullable=False, unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
+
+    workflow_key: Mapped[str] = mapped_column(nullable=False)
+    workflow_version: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(nullable=False, index=True)
+
+    definition_snapshot_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+
+    input_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    context_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    system_context_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    output_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    error_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    active_node_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text),
+        nullable=False,
+        default=list,
+    )
+    resolved_capabilities_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    governance_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    trace_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_workflow_executions_tenant_status",
+            "tenant_id",
+            "status",
+        ),
+        Index(
+            "idx_workflow_executions_definition",
+            "workflow_key",
+            "workflow_version",
+        ),
+        Index(
+            "idx_workflow_executions_created_at",
+            "created_at",
+        ),
+    )
+
+
+class WorkflowStepExecutionRecord(Base):
+    """
+    Durable per-node execution state inside a workflow execution.
+    """
+
+    __tablename__ = "workflow_step_executions"
+
+    workflow_step_execution_id: Mapped[str] = mapped_column(primary_key=True)
+    workflow_execution_id: Mapped[str] = mapped_column(nullable=False, index=True)
+
+    node_id: Mapped[str] = mapped_column(nullable=False)
+    node_type: Mapped[str] = mapped_column(nullable=False)
+    capability_ref_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    status: Mapped[str] = mapped_column(nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    input_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    output_json: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
+    error_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    retry_policy_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    timeout_policy_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    compensation_policy_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+    trace_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_workflow_step_executions_execution_status",
+            "workflow_execution_id",
+            "status",
+        ),
+        Index(
+            "idx_workflow_step_executions_node_attempt",
+            "workflow_execution_id",
+            "node_id",
+            "attempt_no",
+        ),
+    )
+
+
+class WorkflowExecutionEventRecord(Base):
+    """
+    Append-only workflow execution event log for audit / replay / tracing.
+    """
+
+    __tablename__ = "workflow_execution_events"
+
+    workflow_execution_event_id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    workflow_execution_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    workflow_step_execution_id: Mapped[Optional[str]] = mapped_column(
+        nullable=True,
+        index=True,
+    )
+    tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
+
+    event_type: Mapped[str] = mapped_column(nullable=False, index=True)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_workflow_execution_events_execution_created_at",
+            "workflow_execution_id",
             "created_at",
         ),
     )

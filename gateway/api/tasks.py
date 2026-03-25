@@ -11,6 +11,7 @@ from runtime.queue.task_models import (
     AgentTaskPayload,
     GenerationTaskPayload,
     TaskEnvelope,
+    WorkflowTaskPayload,
 )
 from runtime.queue.task_store import (
     TaskStore,
@@ -59,6 +60,27 @@ class GenerationSubmitRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("tenant_id", "prompt", "model")
+    @classmethod
+    def _validate_required_strings(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("value must be a non-empty string")
+        return value.strip()
+
+
+class WorkflowSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    tenant_id: str = Field(..., min_length=1)
+    workflow_key: str = Field(..., min_length=1)
+    workflow_version: str = Field(..., min_length=1)
+    input: Dict[str, Any] = Field(default_factory=dict)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    trigger_source: Optional[str] = None
+    correlation_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+
+    @field_validator("tenant_id", "workflow_key", "workflow_version")
     @classmethod
     def _validate_required_strings(cls, value: str) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -269,6 +291,57 @@ async def submit_video_generation_task(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to durably submit video generation task: {exc}",
+        ) from exc
+
+    return TaskSubmitResponse(
+        task_id=result.task_id,
+        status=result.status,
+        queue_name=result.queue_name,
+        stream_name=result.stream_name,
+        durable=True,
+        outbox_event_id=result.outbox_event_id,
+    )
+
+
+@router.post(
+    "/workflow/submit",
+    response_model=TaskSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def submit_workflow_task(
+    request: WorkflowSubmitRequest,
+    submission_service: TaskSubmissionService = Depends(get_task_submission_service),
+) -> TaskSubmitResponse:
+    payload = WorkflowTaskPayload(
+        workflow_key=request.workflow_key,
+        workflow_version=request.workflow_version,
+        input=request.input,
+        context=request.context,
+        metadata=request.metadata,
+        trigger_source=request.trigger_source,
+    )
+    task = TaskEnvelope.for_workflow(
+        tenant_id=request.tenant_id,
+        payload=payload,
+        queue_name="workflow_tasks",
+        correlation_id=request.correlation_id,
+        idempotency_key=request.idempotency_key,
+    )
+
+    try:
+        result = await submission_service.submit_task(
+            task=task,
+            stream_name="workflow_tasks",
+        )
+    except TaskSubmissionConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Duplicate workflow task submission: {exc}",
+        ) from exc
+    except TaskSubmissionServiceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to durably submit workflow task: {exc}",
         ) from exc
 
     return TaskSubmitResponse(

@@ -102,3 +102,32 @@ def test_generation_submit_uses_generation_stream_name():
     assert len(submission_service.calls) == 1
     assert submission_service.calls[0]["stream_name"] == "generation_tasks"
     assert submission_service.calls[0]["task_type"] == "generation"
+
+
+def test_workflow_submit_uses_workflow_stream_name():
+    client, submission_service = _make_client()
+
+    response = client.post(
+        "/api/v1/workflow/submit",
+        json={
+            "tenant_id": "tenant-a",
+            "workflow_key": "pricing.quote.flow",
+            "workflow_version": "1.0.0",
+            "input": {
+                "customer_name": "Acme",
+            },
+            "context": {
+                "channel": "web",
+            },
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["stream_name"] == "workflow_tasks"
+    assert body["queue_name"] == "workflow_tasks"
+    assert body["durable"] is True
+
+    assert len(submission_service.calls) == 1
+    assert submission_service.calls[0]["stream_name"] == "workflow_tasks"
+    assert submission_service.calls[0]["task_type"] == "workflow"

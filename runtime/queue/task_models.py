@@ -23,6 +23,7 @@ class TaskStatus(str, Enum):
 class TaskType(str, Enum):
     AGENT = "agent"
     GENERATION = "generation"
+    WORKFLOW = "workflow"
 
 
 class AgentTaskPayload(BaseModel):
@@ -69,6 +70,37 @@ class GenerationTaskPayload(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("prompt", "model", "modality")
+    @classmethod
+    def _validate_non_empty(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("value must be a non-empty string")
+        return value.strip()
+
+
+class WorkflowTaskPayload(BaseModel):
+    """
+    Workflow runtime input payload.
+
+    This is intentionally definition-oriented rather than execution-engine-specific:
+    - workflow_key / workflow_version identify the registered workflow definition
+    - input carries business input data
+    - context carries caller-provided execution context
+    - metadata remains open for governance / tracing / routing enrichment
+
+    extra='allow' is intentional so later phases can add orchestration fields
+    without breaking callers.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    workflow_key: str = Field(..., min_length=1)
+    workflow_version: str = Field(..., min_length=1)
+    input: Dict[str, Any] = Field(default_factory=dict)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    trigger_source: Optional[str] = None
+
+    @field_validator("workflow_key", "workflow_version")
     @classmethod
     def _validate_non_empty(cls, value: str) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -149,6 +181,27 @@ class TaskEnvelope(BaseModel):
             task_id=str(uuid4()),
             tenant_id=tenant_id,
             task_type=TaskType.GENERATION,
+            queue_name=queue_name,
+            status=TaskStatus.CREATED,
+            payload=payload.model_dump(mode="json"),
+            correlation_id=correlation_id,
+            idempotency_key=idempotency_key,
+        )
+
+    @classmethod
+    def for_workflow(
+        cls,
+        *,
+        tenant_id: str,
+        payload: WorkflowTaskPayload,
+        queue_name: str = "workflow_tasks",
+        correlation_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> "TaskEnvelope":
+        return cls(
+            task_id=str(uuid4()),
+            tenant_id=tenant_id,
+            task_type=TaskType.WORKFLOW,
             queue_name=queue_name,
             status=TaskStatus.CREATED,
             payload=payload.model_dump(mode="json"),

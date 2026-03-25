@@ -6,11 +6,7 @@ from gateway.api.tasks import (
     get_task_read_store,
     router,
 )
-from runtime.queue.task_models import (
-    AgentTaskPayload,
-    GenerationTaskPayload,
-    TaskEnvelope,
-)
+from runtime.queue.task_models import TaskEnvelope
 from runtime.queue.task_store import InMemoryTaskStore
 
 
@@ -190,6 +186,58 @@ async def test_submit_generation_video_task_and_fetch() -> None:
     assert body["payload"]["model"] == "video-model"
     assert body["payload"]["modality"] == "video"
     assert body["payload"]["duration_seconds"] == 5
+
+
+@pytest.mark.asyncio
+async def test_submit_workflow_task_and_fetch() -> None:
+    app, _store = _build_app_with_overrides()
+    client = TestClient(app)
+
+    submit_resp = client.post(
+        "/api/v1/workflow/submit",
+        json={
+            "tenant_id": "tenant-d",
+            "workflow_key": "pricing.quote.flow",
+            "workflow_version": "1.0.0",
+            "input": {
+                "customer_name": "Acme",
+                "sku": "SOLAR-LIGHT-01",
+            },
+            "context": {
+                "source": "crm",
+            },
+            "metadata": {
+                "trace_id": "trace-001",
+            },
+            "trigger_source": "api",
+        },
+    )
+    assert submit_resp.status_code == 202
+
+    submit_body = submit_resp.json()
+    task_id = submit_body["task_id"]
+
+    assert submit_body["status"] == "queued"
+    assert submit_body["queue_name"] == "workflow_tasks"
+    assert submit_body["stream_name"] == "workflow_tasks"
+    assert submit_body["durable"] is True
+    assert isinstance(submit_body["outbox_event_id"], int)
+
+    get_resp = client.get(f"/api/v1/tasks/{task_id}")
+    assert get_resp.status_code == 200
+
+    body = get_resp.json()
+    assert body["task_id"] == task_id
+    assert body["tenant_id"] == "tenant-d"
+    assert body["task_type"] == "workflow"
+    assert body["queue_name"] == "workflow_tasks"
+    assert body["status"] == "queued"
+    assert body["payload"]["workflow_key"] == "pricing.quote.flow"
+    assert body["payload"]["workflow_version"] == "1.0.0"
+    assert body["payload"]["input"]["customer_name"] == "Acme"
+    assert body["payload"]["context"]["source"] == "crm"
+    assert body["payload"]["metadata"]["trace_id"] == "trace-001"
+    assert body["payload"]["trigger_source"] == "api"
 
 
 @pytest.mark.asyncio

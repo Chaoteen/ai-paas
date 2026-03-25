@@ -8,6 +8,9 @@ from gateway.api.health import router as health_router
 from gateway.api.agent_runtime import router as agent_runtime_router
 from gateway.api.generation import router as generation_router
 from gateway.api.tasks import router as tasks_router
+from gateway.api.workflow_definitions import router as workflow_definitions_router
+from gateway.api.workflow_executions import router as workflow_executions_router
+
 app = FastAPI()
 
 
@@ -29,6 +32,8 @@ app.include_router(ui_router, prefix="/api")
 app.include_router(agent_runtime_router, prefix="/api/v1")
 app.include_router(generation_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
+app.include_router(workflow_definitions_router, prefix="/api/v1")
+app.include_router(workflow_executions_router, prefix="/api/v1")
 
 
 @app.get("/api/ui/bootstrap-legacy")
@@ -48,7 +53,6 @@ FLOWISE_BASE = "http://127.0.0.1:3000"
 )
 async def proxy_flowise(path: str, request: Request):
     url = f"{FLOWISE_BASE}/{path}"
-
     async with httpx.AsyncClient(follow_redirects=True) as client:
         resp = await client.request(
             method=request.method,
@@ -56,9 +60,8 @@ async def proxy_flowise(path: str, request: Request):
             headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
             content=await request.body(),
         )
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-        )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=dict(resp.headers),
+    )
