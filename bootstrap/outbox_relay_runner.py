@@ -5,23 +5,41 @@ import os
 
 from sqlalchemy.exc import ProgrammingError
 
+from runtime.preflight import require_runtime_ready
 from runtime.queue.outbox_relay import OutboxRelay
 from runtime.queue.redis_queue import RedisStreamQueueClient
 from runtime.queue.task_store import get_postgres_session_factory
 
 
-def _int_env(name: str, default: int) -> int:
+def _positive_int_env(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
-    return int(raw.strip())
+
+    value = int(raw.strip())
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+
+    return value
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+
+    value = float(raw.strip())
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0")
+
+    return value
 
 
 def _get_redis_url() -> str:
     redis_url = os.getenv("REDIS_URL", "").strip()
-    if redis_url:
-        return redis_url
-    return "redis://localhost:6379"
+    if not redis_url:
+        raise ValueError("REDIS_URL is required")
+    return redis_url
 
 
 async def build_outbox_relay() -> OutboxRelay:
@@ -31,15 +49,17 @@ async def build_outbox_relay() -> OutboxRelay:
     return OutboxRelay(
         session_factory=session_factory,
         queue_client=queue_client,
-        retry_backoff_seconds=_int_env("OUTBOX_RETRY_BACKOFF_SECONDS", 5),
+        retry_backoff_seconds=_positive_int_env("OUTBOX_RETRY_BACKOFF_SECONDS", 5),
+        max_publish_attempts=_positive_int_env("OUTBOX_MAX_PUBLISH_ATTEMPTS", 10),
     )
 
 
 async def run_relay_forever() -> None:
-    relay = await build_outbox_relay()
+    await require_runtime_ready()
 
-    batch_limit = _int_env("OUTBOX_BATCH_LIMIT", 100)
-    sleep_seconds = float(os.getenv("OUTBOX_RELAY_SLEEP_SECONDS", "1.0"))
+    relay = await build_outbox_relay()
+    batch_limit = _positive_int_env("OUTBOX_BATCH_LIMIT", 100)
+    sleep_seconds = _float_env("OUTBOX_RELAY_SLEEP_SECONDS", 1.0)
 
     while True:
         try:

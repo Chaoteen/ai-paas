@@ -4,11 +4,11 @@ import asyncio
 import os
 from typing import Literal
 
+from runtime.preflight import require_runtime_ready
 from runtime.queue.redis_queue import RedisStreamQueueClient
 from runtime.queue.task_store import get_task_store
 from runtime.workers.agent_worker import AgentWorker
 from runtime.workers.generation_worker import GenerationWorker
-
 
 WorkerKind = Literal["agent", "generation"]
 
@@ -50,9 +50,10 @@ def _build_worker(kind: WorkerKind, queue_client, store, consumer_name: str):
 
 
 async def run_worker_forever() -> None:
+    await require_runtime_ready()
+
     kind = _get_worker_kind()
     consumer_name = _get_consumer_name(kind)
-
     queue_client = RedisStreamQueueClient(redis_url=_get_redis_url())
     store = await get_task_store()
     worker = _build_worker(kind, queue_client, store, consumer_name)

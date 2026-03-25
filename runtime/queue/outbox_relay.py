@@ -3,8 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import inspect
-import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 from persistence.repositories.outbox_repository import OutboxRepository
 from runtime.queue.redis_queue import RedisStreamQueueClient
@@ -25,16 +24,17 @@ class OutboxRelay:
         session_factory: Callable[..., Any],
         queue_client: RedisStreamQueueClient,
         retry_backoff_seconds: int = 5,
-        max_publish_attempts: Optional[int] = None,
+        max_publish_attempts: int = 10,
     ) -> None:
+        if retry_backoff_seconds < 0:
+            raise ValueError("retry_backoff_seconds must be >= 0")
+        if max_publish_attempts <= 0:
+            raise ValueError("max_publish_attempts must be > 0")
+
         self._session_factory = session_factory
         self._queue_client = queue_client
         self.retry_backoff_seconds = retry_backoff_seconds
-        self.max_publish_attempts = (
-            max_publish_attempts
-            if max_publish_attempts is not None
-            else int(os.getenv("OUTBOX_MAX_PUBLISH_ATTEMPTS", "10"))
-        )
+        self.max_publish_attempts = max_publish_attempts
 
     @property
     def queue_client(self) -> RedisStreamQueueClient:
@@ -42,14 +42,12 @@ class OutboxRelay:
 
     async def run_once(self, *, limit: int = 100) -> OutboxRelayResult:
         events = await self._load_publishable_events(limit=limit)
-
         published = 0
         failed = 0
         dead_lettered = 0
 
         for event in events:
             publish_attempts = int(getattr(event, "publish_attempts", 0) or 0)
-
             try:
                 await self._publish_event(event)
                 published += 1
@@ -145,6 +143,7 @@ class OutboxRelay:
 
     async def _call_repo_method(self, repo: Any, method_name: str, **kwargs) -> Any:
         method = getattr(repo, method_name)
+
         try:
             return await method(**kwargs)
         except TypeError:
@@ -152,11 +151,8 @@ class OutboxRelay:
 
         sig = inspect.signature(method)
         accepted = {
-            name: value
-            for name, value in kwargs.items()
-            if name in sig.parameters
+            name: value for name, value in kwargs.items() if name in sig.parameters
         }
-
         if accepted:
             try:
                 return await method(**accepted)

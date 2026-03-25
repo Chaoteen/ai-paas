@@ -66,7 +66,10 @@ def patch_outbox_repo(monkeypatch):
         async def mark_published(self, *, event_id):
             return self._session.records[event_id]
 
-        async def mark_failed(self, *, event_id, error_text, next_available_at=None):
+        async def mark_failed(self, *, event_id, error_text, next_available_at=None, available_at=None):
+            return self._session.records[event_id]
+
+        async def mark_dead_letter(self, *, event_id, error_text):
             return self._session.records[event_id]
 
     monkeypatch.setattr(relay_mod, "OutboxRepository", FakeOutboxRepository)
@@ -86,7 +89,6 @@ async def test_outbox_relay_publishes_events(patch_outbox_repo):
             payload_json={"task_id": "task-2"},
         ),
     ]
-
     relay = OutboxRelay(
         session_factory=FakeSessionFactory(records),
         queue_client=FakeQueue(),
@@ -97,6 +99,7 @@ async def test_outbox_relay_publishes_events(patch_outbox_repo):
     assert result.scanned == 2
     assert result.published == 2
     assert result.failed == 0
+    assert result.dead_lettered == 0
 
 
 @pytest.mark.asyncio
@@ -108,11 +111,11 @@ async def test_outbox_relay_marks_failures(patch_outbox_repo):
             payload_json={"task_id": "task-1"},
         )
     ]
-
     relay = OutboxRelay(
         session_factory=FakeSessionFactory(records),
         queue_client=FakeQueue(fail=True),
         retry_backoff_seconds=3,
+        max_publish_attempts=10,
     )
 
     result = await relay.run_once(limit=10)
@@ -120,3 +123,34 @@ async def test_outbox_relay_marks_failures(patch_outbox_repo):
     assert result.scanned == 1
     assert result.published == 0
     assert result.failed == 1
+    assert result.dead_lettered == 0
+
+
+def test_outbox_relay_allows_zero_retry_backoff():
+    relay = OutboxRelay(
+        session_factory=FakeSessionFactory([]),
+        queue_client=FakeQueue(),
+        retry_backoff_seconds=0,
+        max_publish_attempts=10,
+    )
+    assert relay.retry_backoff_seconds == 0
+
+
+def test_outbox_relay_rejects_negative_retry_backoff():
+    with pytest.raises(ValueError, match="retry_backoff_seconds must be >= 0"):
+        OutboxRelay(
+            session_factory=FakeSessionFactory([]),
+            queue_client=FakeQueue(),
+            retry_backoff_seconds=-1,
+            max_publish_attempts=10,
+        )
+
+
+def test_outbox_relay_rejects_non_positive_max_publish_attempts():
+    with pytest.raises(ValueError, match="max_publish_attempts must be > 0"):
+        OutboxRelay(
+            session_factory=FakeSessionFactory([]),
+            queue_client=FakeQueue(),
+            retry_backoff_seconds=5,
+            max_publish_attempts=0,
+        )
