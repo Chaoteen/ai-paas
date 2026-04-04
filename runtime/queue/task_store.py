@@ -4,12 +4,12 @@ import asyncio
 import inspect
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Callable
+from collections.abc import Callable
+from typing import Any, Dict, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from persistence.db import Database
-from persistence.settings import PostgresSettings
+from persistence.db import dispose_async_engine, get_async_session_factory
 from runtime.queue.task_models import TaskEnvelope
 
 
@@ -119,34 +119,19 @@ class InMemoryTaskStore(TaskStore):
 _task_store: Optional[TaskStore] = None
 _task_store_lock = asyncio.Lock()
 
-_database: Optional[Database] = None
-_database_lock = asyncio.Lock()
-
 
 def get_task_store_backend_name() -> str:
     return os.getenv("TASK_STORE_BACKEND", "memory").strip().lower()
 
 
-async def get_database() -> Database:
-    global _database
-
-    if _database is not None:
-        return _database
-
-    async with _database_lock:
-        if _database is None:
-            _database = Database(PostgresSettings())
-
-    return _database
-
-
 async def get_postgres_session_factory() -> Callable[[], AsyncSession]:
-    db = await get_database()
+    """
+    Formal single source of truth for Postgres async sessions.
 
-    def _factory() -> AsyncSession:
-        return db._session_factory()  # noqa: SLF001 - controlled runtime factory access
-
-    return _factory
+    This intentionally delegates to persistence.db and does NOT cache a
+    Database wrapper or any module-local engine/session factory state.
+    """
+    return get_async_session_factory()
 
 
 async def _build_task_store() -> TaskStore:
@@ -168,15 +153,13 @@ async def _build_task_store() -> TaskStore:
 
 async def get_task_store() -> TaskStore:
     global _task_store
-
     if _task_store is not None:
         return _task_store
 
     async with _task_store_lock:
         if _task_store is None:
             _task_store = await _build_task_store()
-
-    return _task_store
+        return _task_store
 
 
 async def set_task_store(store: TaskStore) -> None:
@@ -188,6 +171,24 @@ async def set_task_store(store: TaskStore) -> None:
 
 
 async def reset_task_store() -> None:
+    """
+    Reset only the TaskStore singleton.
+
+    This does not dispose the shared SQLAlchemy async engine. Use
+    shutdown_task_store_runtime_state() when process/app shutdown should
+    fully release DB resources.
+    """
     global _task_store
     async with _task_store_lock:
         _task_store = None
+
+
+async def shutdown_task_store_runtime_state() -> None:
+    """
+    Formal runtime shutdown hook.
+
+    1. Reset task store singleton.
+    2. Dispose the shared async engine/session factory owned by persistence.db.
+    """
+    await reset_task_store()
+    await dispose_async_engine()

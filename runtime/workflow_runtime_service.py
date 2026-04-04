@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict
 from uuid import uuid4
 
@@ -25,6 +25,7 @@ from runtime.workflows.capability_executor import (
     WorkflowCapabilityExecutor,
 )
 from runtime.workflows.models import (
+    RetryPolicy,
     WorkflowDefinition,
     WorkflowExecution,
     WorkflowExecutionEvent,
@@ -54,7 +55,7 @@ class WorkflowRuntimeService:
     - resolve workflow definition from registry
     - create durable workflow execution record
     - execute sequential capability nodes deterministically
-    - persist success and failure state transitions
+    - persist retry / success / failure state transitions
     - append workflow execution events
 
     Supported node types:
@@ -174,7 +175,6 @@ class WorkflowRuntimeService:
             event_repo = WorkflowExecutionEventRepository(session)
 
             await execution_repo.create(execution)
-
             await event_repo.create(
                 WorkflowExecutionEvent(
                     workflow_execution_id=workflow_execution_id,
@@ -188,7 +188,6 @@ class WorkflowRuntimeService:
                     },
                 )
             )
-
             await event_repo.create(
                 WorkflowExecutionEvent(
                     workflow_execution_id=workflow_execution_id,
@@ -215,150 +214,21 @@ class WorkflowRuntimeService:
                                 f"Unsupported workflow node_type for sequential runtime: {node.node_type.value}"
                             )
 
-                        created_step_count += 1
-                        step_execution_id = f"wf-step-{uuid4().hex}"
-                        step_outputs_snapshot = deepcopy(step_outputs)
-
-                        step_execution = WorkflowStepExecution(
-                            workflow_step_execution_id=step_execution_id,
-                            workflow_execution_id=workflow_execution_id,
-                            node_id=node.node_id,
-                            node_type=node.node_type.value,
-                            capability_ref_json=(
-                                node.capability_ref.model_dump(mode="json")
-                                if node.capability_ref
-                                else {}
-                            ),
-                            status=WorkflowStepExecutionStatus.READY,
-                            attempt_no=1,
-                            input_json={
-                                "workflow_input": deepcopy(workflow_input),
-                                "workflow_context": deepcopy(workflow_context),
-                                "step_outputs": step_outputs_snapshot,
-                                "node_input_mapping": deepcopy(node.input_mapping),
-                            },
-                            output_json=None,
-                            error_text=None,
-                            retry_policy_json=node.retry_policy.model_dump(mode="json"),
-                            timeout_policy_json=node.timeout_policy.model_dump(mode="json"),
-                            compensation_policy_json=node.compensation_policy.model_dump(mode="json"),
-                            trace_json={
-                                "workflow_execution_id": workflow_execution_id,
-                                "node_id": node.node_id,
-                            },
-                        )
-                        await step_repo.create(step_execution)
-
-                        await event_repo.create(
-                            WorkflowExecutionEvent(
-                                workflow_execution_id=workflow_execution_id,
-                                workflow_step_execution_id=step_execution_id,
-                                tenant_id=task.tenant_id,
-                                event_type=WorkflowExecutionEventType.STEP_CREATED,
-                                payload_json={
-                                    "node_id": node.node_id,
-                                    "node_type": node.node_type.value,
-                                    "status": WorkflowStepExecutionStatus.READY.value,
-                                },
-                            )
+                        output = await self._execute_capability_node_with_retry(
+                            session=session,
+                            execution=execution,
+                            node=node,
+                            workflow_input=workflow_input,
+                            workflow_context=workflow_context,
+                            step_outputs=step_outputs,
+                            step_repo=step_repo,
+                            event_repo=event_repo,
                         )
 
-                        step_execution.status = WorkflowStepExecutionStatus.RUNNING
-                        step_execution.started_at = _utcnow()
-                        await step_repo.update(step_execution)
-
-                        await event_repo.create(
-                            WorkflowExecutionEvent(
-                                workflow_execution_id=workflow_execution_id,
-                                workflow_step_execution_id=step_execution_id,
-                                tenant_id=task.tenant_id,
-                                event_type=WorkflowExecutionEventType.STEP_RUNNING,
-                                payload_json={
-                                    "node_id": node.node_id,
-                                    "status": WorkflowStepExecutionStatus.RUNNING.value,
-                                },
-                            )
-                        )
-
-                        try:
-                            output = await self._capability_executor.execute(
-                                node=node,
-                                workflow_input=deepcopy(workflow_input),
-                                workflow_context=deepcopy(workflow_context),
-                                step_outputs=deepcopy(step_outputs),
-                            )
-                        except Exception as exc:
-                            step_execution.status = WorkflowStepExecutionStatus.FAILED
-                            step_execution.error_text = str(exc)
-                            step_execution.finished_at = _utcnow()
-                            await step_repo.update(step_execution)
-
-                            await event_repo.create(
-                                WorkflowExecutionEvent(
-                                    workflow_execution_id=workflow_execution_id,
-                                    workflow_step_execution_id=step_execution_id,
-                                    tenant_id=task.tenant_id,
-                                    event_type=WorkflowExecutionEventType.STEP_FAILED,
-                                    payload_json={
-                                        "node_id": node.node_id,
-                                        "status": WorkflowStepExecutionStatus.FAILED.value,
-                                        "error": str(exc),
-                                    },
-                                )
-                            )
-
-                            execution.status = WorkflowExecutionStatus.FAILED
-                            execution.active_node_ids = []
-                            execution.error_text = str(exc)
-                            execution.output_json = {
-                                "step_outputs": deepcopy(step_outputs),
-                                "executed_step_count": executed_step_count,
-                                "final_status": WorkflowExecutionStatus.FAILED.value,
-                            }
-                            execution.finished_at = _utcnow()
-                            await execution_repo.update(execution)
-
-                            await event_repo.create(
-                                WorkflowExecutionEvent(
-                                    workflow_execution_id=workflow_execution_id,
-                                    workflow_step_execution_id=None,
-                                    tenant_id=task.tenant_id,
-                                    event_type=WorkflowExecutionEventType.EXECUTION_FAILED,
-                                    payload_json={
-                                        "status": WorkflowExecutionStatus.FAILED.value,
-                                        "executed_step_count": executed_step_count,
-                                        "error": str(exc),
-                                    },
-                                )
-                            )
-
-                            await session.commit()
-
-                            if isinstance(exc, WorkflowCapabilityExecutionFailed):
-                                raise
-                            raise WorkflowRuntimeServiceError(str(exc)) from exc
-
+                        created_step_count += output["created_step_count"]
                         executed_step_count += 1
-                        step_outputs[node.node_id] = deepcopy(output)
 
-                        step_execution.status = WorkflowStepExecutionStatus.SUCCEEDED
-                        step_execution.output_json = deepcopy(output)
-                        step_execution.finished_at = _utcnow()
-                        await step_repo.update(step_execution)
-
-                        await event_repo.create(
-                            WorkflowExecutionEvent(
-                                workflow_execution_id=workflow_execution_id,
-                                workflow_step_execution_id=step_execution_id,
-                                tenant_id=task.tenant_id,
-                                event_type=WorkflowExecutionEventType.STEP_SUCCEEDED,
-                                payload_json={
-                                    "node_id": node.node_id,
-                                    "status": WorkflowStepExecutionStatus.SUCCEEDED.value,
-                                    "output": deepcopy(output),
-                                },
-                            )
-                        )
+                        step_outputs[node.node_id] = deepcopy(output["step_output"])
 
                         next_nodes = self._resolve_next_nodes(
                             source_node_id=node.node_id,
@@ -405,11 +275,63 @@ class WorkflowRuntimeService:
                         },
                     )
                 )
-
                 await session.commit()
 
-            except WorkflowCapabilityExecutionFailed:
+            except WorkflowCapabilityExecutionFailed as exc:
+                execution.status = WorkflowExecutionStatus.FAILED
+                execution.active_node_ids = []
+                execution.error_text = str(exc)
+                execution.output_json = {
+                    "step_outputs": deepcopy(step_outputs),
+                    "executed_step_count": executed_step_count,
+                    "final_status": WorkflowExecutionStatus.FAILED.value,
+                }
+                execution.finished_at = _utcnow()
+
+                await execution_repo.update(execution)
+                await event_repo.create(
+                    WorkflowExecutionEvent(
+                        workflow_execution_id=workflow_execution_id,
+                        workflow_step_execution_id=None,
+                        tenant_id=task.tenant_id,
+                        event_type=WorkflowExecutionEventType.EXECUTION_FAILED,
+                        payload_json={
+                            "status": WorkflowExecutionStatus.FAILED.value,
+                            "executed_step_count": executed_step_count,
+                            "error": str(exc),
+                        },
+                    )
+                )
+                await session.commit()
                 raise
+
+            except Exception as exc:
+                execution.status = WorkflowExecutionStatus.FAILED
+                execution.active_node_ids = []
+                execution.error_text = str(exc)
+                execution.output_json = {
+                    "step_outputs": deepcopy(step_outputs),
+                    "executed_step_count": executed_step_count,
+                    "final_status": WorkflowExecutionStatus.FAILED.value,
+                }
+                execution.finished_at = _utcnow()
+
+                await execution_repo.update(execution)
+                await event_repo.create(
+                    WorkflowExecutionEvent(
+                        workflow_execution_id=workflow_execution_id,
+                        workflow_step_execution_id=None,
+                        tenant_id=task.tenant_id,
+                        event_type=WorkflowExecutionEventType.EXECUTION_FAILED,
+                        payload_json={
+                            "status": WorkflowExecutionStatus.FAILED.value,
+                            "executed_step_count": executed_step_count,
+                            "error": str(exc),
+                        },
+                    )
+                )
+                await session.commit()
+                raise WorkflowRuntimeServiceError(str(exc)) from exc
 
         return {
             "status": "accepted",
@@ -422,6 +344,241 @@ class WorkflowRuntimeService:
             "executed_step_count": executed_step_count,
             "step_outputs": deepcopy(step_outputs),
         }
+
+    async def _execute_capability_node_with_retry(
+        self,
+        *,
+        session: AsyncSession,
+        execution: WorkflowExecution,
+        node: WorkflowNode,
+        workflow_input: Dict[str, Any],
+        workflow_context: Dict[str, Any],
+        step_outputs: Dict[str, Any],
+        step_repo: WorkflowStepExecutionRepository,
+        event_repo: WorkflowExecutionEventRepository,
+    ) -> Dict[str, Any]:
+        retry_policy = self._normalize_retry_policy(node.retry_policy)
+        max_attempts = retry_policy.max_attempts
+        created_step_count = 0
+        last_error: str | None = None
+
+        retry_state = step_outputs.setdefault("__retry_state__", {})
+        if not isinstance(retry_state, dict):
+            retry_state = {}
+            step_outputs["__retry_state__"] = retry_state
+
+        node_retry_state = retry_state.setdefault(node.node_id, {})
+        if not isinstance(node_retry_state, dict):
+            node_retry_state = {}
+            retry_state[node.node_id] = node_retry_state
+
+        failure_count = int(node_retry_state.get("failure_count", 0) or 0)
+
+        for attempt_no in range(1, max_attempts + 1):
+            created_step_count += 1
+            step_execution_id = f"wf-step-{uuid4().hex}"
+            step_outputs_snapshot = deepcopy(step_outputs)
+
+            step_execution = WorkflowStepExecution(
+                workflow_step_execution_id=step_execution_id,
+                workflow_execution_id=execution.workflow_execution_id,
+                node_id=node.node_id,
+                node_type=node.node_type.value,
+                capability_ref_json=(
+                    node.capability_ref.model_dump(mode="json")
+                    if node.capability_ref
+                    else {}
+                ),
+                status=WorkflowStepExecutionStatus.CREATED,
+                attempt_no=attempt_no,
+                input_json={
+                    "workflow_input": deepcopy(workflow_input),
+                    "workflow_context": deepcopy(workflow_context),
+                    "step_outputs": step_outputs_snapshot,
+                    "node_input_mapping": deepcopy(node.input_mapping),
+                },
+                output_json=None,
+                error_text=None,
+                retry_policy_json=node.retry_policy.model_dump(mode="json"),
+                timeout_policy_json=node.timeout_policy.model_dump(mode="json"),
+                compensation_policy_json=node.compensation_policy.model_dump(mode="json"),
+                trace_json={
+                    "workflow_execution_id": execution.workflow_execution_id,
+                    "node_id": node.node_id,
+                    "attempt_no": attempt_no,
+                },
+            )
+
+            await step_repo.create(step_execution)
+            await event_repo.create(
+                WorkflowExecutionEvent(
+                    workflow_execution_id=execution.workflow_execution_id,
+                    workflow_step_execution_id=step_execution_id,
+                    tenant_id=execution.tenant_id,
+                    event_type=WorkflowExecutionEventType.STEP_CREATED,
+                    payload_json={
+                        "node_id": node.node_id,
+                        "node_type": node.node_type.value,
+                        "status": WorkflowStepExecutionStatus.CREATED.value,
+                        "attempt_no": attempt_no,
+                    },
+                )
+            )
+
+            step_execution.status = WorkflowStepExecutionStatus.RUNNING
+            step_execution.started_at = _utcnow()
+            await step_repo.update(step_execution)
+            await event_repo.create(
+                WorkflowExecutionEvent(
+                    workflow_execution_id=execution.workflow_execution_id,
+                    workflow_step_execution_id=step_execution_id,
+                    tenant_id=execution.tenant_id,
+                    event_type=WorkflowExecutionEventType.STEP_RUNNING,
+                    payload_json={
+                        "node_id": node.node_id,
+                        "status": WorkflowStepExecutionStatus.RUNNING.value,
+                        "attempt_no": attempt_no,
+                    },
+                )
+            )
+
+            try:
+                output = await self._capability_executor.execute(
+                    node=node,
+                    workflow_input=deepcopy(workflow_input),
+                    workflow_context=deepcopy(workflow_context),
+                    step_outputs=deepcopy(step_outputs),
+                )
+            except WorkflowCapabilityExecutionFailed as exc:
+                last_error = str(exc)
+                failure_count += 1
+                node_retry_state["failure_count"] = failure_count
+                node_retry_state["last_error"] = last_error
+                node_retry_state["last_attempt_no"] = attempt_no
+
+                has_next_attempt = attempt_no < max_attempts
+
+                step_execution.status = (
+                    WorkflowStepExecutionStatus.RETRYING
+                    if has_next_attempt
+                    else WorkflowStepExecutionStatus.FAILED
+                )
+                step_execution.error_text = last_error
+                step_execution.finished_at = _utcnow()
+                step_execution.output_json = {
+                    "retry_state": deepcopy(node_retry_state),
+                }
+                await step_repo.update(step_execution)
+
+                if has_next_attempt:
+                    await event_repo.create(
+                        WorkflowExecutionEvent(
+                            workflow_execution_id=execution.workflow_execution_id,
+                            workflow_step_execution_id=step_execution_id,
+                            tenant_id=execution.tenant_id,
+                            event_type=WorkflowExecutionEventType.STEP_RETRYING,
+                            payload_json={
+                                "node_id": node.node_id,
+                                "status": WorkflowStepExecutionStatus.RETRYING.value,
+                                "attempt_no": attempt_no,
+                                "next_attempt_no": attempt_no + 1,
+                                "max_attempts": max_attempts,
+                                "error": last_error,
+                                "backoff_seconds": retry_policy.backoff_seconds,
+                                "retry_strategy": retry_policy.strategy,
+                                "retry_available_at": (
+                                    _utcnow()
+                                    + timedelta(seconds=retry_policy.backoff_seconds)
+                                ).isoformat(),
+                                "retry_state": deepcopy(node_retry_state),
+                            },
+                        )
+                    )
+                    await session.commit()
+                    continue
+
+                await event_repo.create(
+                    WorkflowExecutionEvent(
+                        workflow_execution_id=execution.workflow_execution_id,
+                        workflow_step_execution_id=step_execution_id,
+                        tenant_id=execution.tenant_id,
+                        event_type=WorkflowExecutionEventType.STEP_FAILED,
+                        payload_json={
+                            "node_id": node.node_id,
+                            "status": WorkflowStepExecutionStatus.FAILED.value,
+                            "attempt_no": attempt_no,
+                            "max_attempts": max_attempts,
+                            "error": last_error,
+                            "retry_state": deepcopy(node_retry_state),
+                        },
+                    )
+                )
+                await session.commit()
+                raise
+
+            except Exception as exc:
+                last_error = str(exc)
+
+                step_execution.status = WorkflowStepExecutionStatus.FAILED
+                step_execution.error_text = last_error
+                step_execution.finished_at = _utcnow()
+                await step_repo.update(step_execution)
+
+                await event_repo.create(
+                    WorkflowExecutionEvent(
+                        workflow_execution_id=execution.workflow_execution_id,
+                        workflow_step_execution_id=step_execution_id,
+                        tenant_id=execution.tenant_id,
+                        event_type=WorkflowExecutionEventType.STEP_FAILED,
+                        payload_json={
+                            "node_id": node.node_id,
+                            "status": WorkflowStepExecutionStatus.FAILED.value,
+                            "attempt_no": attempt_no,
+                            "max_attempts": max_attempts,
+                            "error": last_error,
+                        },
+                    )
+                )
+                await session.commit()
+                raise WorkflowRuntimeServiceError(last_error) from exc
+
+            node_retry_state["last_success_attempt_no"] = attempt_no
+
+            step_execution.status = WorkflowStepExecutionStatus.SUCCEEDED
+            step_execution.output_json = deepcopy(output)
+            step_execution.finished_at = _utcnow()
+            await step_repo.update(step_execution)
+            await event_repo.create(
+                WorkflowExecutionEvent(
+                    workflow_execution_id=execution.workflow_execution_id,
+                    workflow_step_execution_id=step_execution_id,
+                    tenant_id=execution.tenant_id,
+                    event_type=WorkflowExecutionEventType.STEP_SUCCEEDED,
+                    payload_json={
+                        "node_id": node.node_id,
+                        "status": WorkflowStepExecutionStatus.SUCCEEDED.value,
+                        "attempt_no": attempt_no,
+                        "max_attempts": max_attempts,
+                        "output": deepcopy(output),
+                    },
+                )
+            )
+            await session.commit()
+
+            return {
+                "created_step_count": created_step_count,
+                "step_output": deepcopy(output),
+            }
+
+        raise WorkflowCapabilityExecutionFailed(
+            last_error or f"Capability execution failed after retries: {node.node_id}"
+        )
+
+    @staticmethod
+    def _normalize_retry_policy(retry_policy: RetryPolicy | None) -> RetryPolicy:
+        if retry_policy is None:
+            return RetryPolicy()
+        return retry_policy
 
     @staticmethod
     def _find_single_start_node(definition: WorkflowDefinition) -> WorkflowNode:
@@ -442,7 +599,6 @@ class WorkflowRuntimeService:
     ) -> list[WorkflowNode]:
         next_node_ids = outgoing_edges.get(source_node_id, [])
         next_nodes: list[WorkflowNode] = []
-
         for node_id in next_node_ids:
             node = nodes_by_id.get(node_id)
             if node is None:
@@ -450,5 +606,4 @@ class WorkflowRuntimeService:
                     f"Workflow definition references unknown node_id: {node_id}"
                 )
             next_nodes.append(node)
-
         return next_nodes

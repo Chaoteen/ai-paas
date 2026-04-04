@@ -1,17 +1,36 @@
-from fastapi import FastAPI, Depends, Request
-from fastapi.responses import Response
-import httpx
+from __future__ import annotations
 
-from gateway.ui_bootstrap import build_bootstrap
-from gateway.api.ui import router as ui_router
-from gateway.api.health import router as health_router
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import Response
+
 from gateway.api.agent_runtime import router as agent_runtime_router
 from gateway.api.generation import router as generation_router
+from gateway.api.health import router as health_router
 from gateway.api.tasks import router as tasks_router
+from gateway.api.ui import router as ui_router
 from gateway.api.workflow_definitions import router as workflow_definitions_router
 from gateway.api.workflow_executions import router as workflow_executions_router
+from gateway.api.workflow_products import router as workflow_products_router
+from gateway.ui_bootstrap import build_bootstrap
+from persistence.db import get_async_engine, get_async_session_factory
+from runtime.queue.task_store import shutdown_task_store_runtime_state
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Warm up the formal shared DB runtime state.
+    get_async_engine()
+    get_async_session_factory()
+    try:
+        yield
+    finally:
+        await shutdown_task_store_runtime_state()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def get_user_ctx():
@@ -34,6 +53,7 @@ app.include_router(generation_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(workflow_definitions_router, prefix="/api/v1")
 app.include_router(workflow_executions_router, prefix="/api/v1")
+app.include_router(workflow_products_router, prefix="/api/v1")
 
 
 @app.get("/api/ui/bootstrap-legacy")

@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
-from functools import lru_cache
-from typing import AsyncIterator, Any
-from urllib.parse import quote_plus
+from typing import Optional
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,175 +11,107 @@ from sqlalchemy.ext.asyncio import (
 )
 
 
-class PersistenceConfigurationError(Exception):
-    """Raised when persistence configuration is missing or invalid."""
+class PersistenceConfigurationError(RuntimeError):
+    """Raised when persistence/database configuration is invalid."""
+
+
+_engine: Optional[AsyncEngine] = None
+_session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+
+
+def _build_database_url_from_postgres_parts() -> Optional[str]:
+    host = os.getenv("POSTGRES_HOST")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB")
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+
+    if not all([host, db, user, password]):
+        return None
+
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{db}"
 
 
 def _resolve_database_url() -> str:
     """
-    Resolve the async SQLAlchemy database URL.
+    Formal single source of truth for async SQLAlchemy database URL resolution.
 
-    Priority:
+    Resolution order:
     1. DATABASE_URL
     2. POSTGRES_DSN
-
-    Expected format for async usage:
-    postgresql+asyncpg://user:pass@host:port/dbname
+    3. POSTGRES_HOST / PORT / DB / USER / PASSWORD
     """
-    database_url = (
-        os.getenv("DATABASE_URL")
-        or os.getenv("POSTGRES_DSN")
-        or ""
-    ).strip()
+    database_url = os.getenv("DATABASE_URL")
+    if database_url:
+        return database_url.strip()
 
-    if not database_url:
-        raise PersistenceConfigurationError(
-            "DATABASE_URL or POSTGRES_DSN must be configured"
-        )
+    postgres_dsn = os.getenv("POSTGRES_DSN")
+    if postgres_dsn:
+        return postgres_dsn.strip()
 
-    if not database_url.startswith("postgresql+asyncpg://"):
-        raise PersistenceConfigurationError(
-            "Database URL must use async SQLAlchemy driver prefix "
-            "'postgresql+asyncpg://'"
-        )
+    database_url = _build_database_url_from_postgres_parts()
+    if database_url:
+        return database_url
 
-    return database_url
-
-
-@lru_cache(maxsize=1)
-def get_async_engine() -> AsyncEngine:
-    database_url = _resolve_database_url()
-
-    return create_async_engine(
-        database_url,
-        echo=False,
-        future=True,
-        pool_pre_ping=True,
-        pool_recycle=1800,
+    raise PersistenceConfigurationError(
+        "DATABASE_URL or POSTGRES_DSN must be configured, "
+        "or POSTGRES_HOST/POSTGRES_PORT/POSTGRES_DB/POSTGRES_USER/POSTGRES_PASSWORD must all be set"
     )
 
 
-@lru_cache(maxsize=1)
+def get_async_engine() -> AsyncEngine:
+    global _engine
+
+    if _engine is not None:
+        return _engine
+
+    database_url = _resolve_database_url()
+    _engine = create_async_engine(
+        database_url,
+        future=True,
+        pool_pre_ping=True,
+    )
+    return _engine
+
+
 def get_async_session_factory() -> async_sessionmaker[AsyncSession]:
+    global _session_factory
+
+    if _session_factory is not None:
+        return _session_factory
+
     engine = get_async_engine()
-    return async_sessionmaker(
+    _session_factory = async_sessionmaker(
         bind=engine,
         class_=AsyncSession,
         expire_on_commit=False,
         autoflush=False,
+        autocommit=False,
     )
+    return _session_factory
 
 
 async def dispose_async_engine() -> None:
-    """
-    Dispose cached async engine.
+    global _engine, _session_factory
 
-    Useful in tests or controlled shutdown paths.
-    """
-    try:
-        engine = get_async_engine()
-    except PersistenceConfigurationError:
-        return
+    if _engine is not None:
+        await _engine.dispose()
 
-    await engine.dispose()
-    get_async_engine.cache_clear()
-    get_async_session_factory.cache_clear()
-
-
-def _build_async_url_from_settings(settings: Any) -> str:
-    """
-    Build asyncpg SQLAlchemy URL from PostgresSettings-like object.
-
-    Expected attributes:
-    - host
-    - port
-    - database
-    - user
-    - password
-
-    Optional attributes:
-    - async_database_url
-    - database_url
-    """
-    for attr in ("async_database_url", "database_url"):
-        value = getattr(settings, attr, None)
-        if isinstance(value, str) and value.strip():
-            url = value.strip()
-            if not url.startswith("postgresql+asyncpg://"):
-                raise PersistenceConfigurationError(
-                    f"{attr} must use 'postgresql+asyncpg://' prefix"
-                )
-            return url
-
-    host = getattr(settings, "host", None)
-    port = getattr(settings, "port", None)
-    database = getattr(settings, "database", None)
-    user = getattr(settings, "user", None)
-    password = getattr(settings, "password", None)
-
-    missing = [
-        name for name, value in [
-            ("host", host),
-            ("port", port),
-            ("database", database),
-            ("user", user),
-            ("password", password),
-        ]
-        if value in (None, "")
-    ]
-    if missing:
-        raise PersistenceConfigurationError(
-            "Missing database settings fields: " + ", ".join(missing)
-        )
-
-    return (
-        "postgresql+asyncpg://"
-        f"{quote_plus(str(user))}:{quote_plus(str(password))}"
-        f"@{host}:{port}/{database}"
-    )
+    _engine = None
+    _session_factory = None
 
 
 class Database:
     """
-    Compatibility wrapper retained for repositories/tests that still use:
+    Compatibility wrapper around the formal persistence runtime.
 
-        database = Database(settings)
-        async with database.engine.begin() as conn: ...
-        async with database.session() as session: ...
-        await database.dispose()
-
-    This is a thin async SQLAlchemy wrapper and should be treated as a
-    compatibility layer during formal-release governance.
+    Existing code that still expects Database(...).engine / session_factory / dispose()
+    should resolve to the same shared engine/session-factory managed in this module.
     """
 
-    def __init__(self, settings: Any):
-        self.settings = settings
-        self.database_url = _build_async_url_from_settings(settings)
-        self.engine: AsyncEngine = create_async_engine(
-            self.database_url,
-            echo=bool(getattr(settings, "echo", False)),
-            future=True,
-            pool_pre_ping=True,
-            pool_recycle=1800,
-        )
-        self._session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-            bind=self.engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-            autoflush=False,
-        )
-
-    @asynccontextmanager
-    async def session(self) -> AsyncIterator[AsyncSession]:
-        session = self._session_factory()
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        finally:
-            await session.close()
+    def __init__(self, _settings: object | None = None) -> None:
+        self.engine = get_async_engine()
+        self.session_factory = get_async_session_factory()
 
     async def dispose(self) -> None:
-        await self.engine.dispose()
+        await dispose_async_engine()
