@@ -202,7 +202,7 @@ def _build_step_execution(
 
 async def test_workflow_definition_repository_round_trip_postgres() -> None:
     database = Database(PostgresSettings())
-    session_factory = database._session_factory  # noqa: SLF001
+    session_factory = database.session_factory  # noqa: SLF001
 
     try:
         workflow_key = f"pricing.quote.flow.{uuid.uuid4().hex[:8]}"
@@ -248,7 +248,7 @@ async def test_workflow_definition_repository_round_trip_postgres() -> None:
 
 async def test_workflow_execution_step_event_round_trip_postgres() -> None:
     database = Database(PostgresSettings())
-    session_factory = database._session_factory  # noqa: SLF001
+    session_factory = database.session_factory  # noqa: SLF001 phase19去掉了_session前面的_
 
     try:
         workflow_key = f"pricing.quote.flow.{uuid.uuid4().hex[:8]}"

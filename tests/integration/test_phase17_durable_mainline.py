@@ -70,7 +70,7 @@ async def _clear_runtime_tables() -> None:
     from persistence.settings import PostgresSettings
 
     db = Database(PostgresSettings())
-    async with db._session_factory() as session:  # noqa: SLF001 - integration setup
+    async with db.session_factory() as session:  # noqa: SLF001 - integration setup phase19去掉了_session前面的_
         await session.execute(text("DELETE FROM runtime_outbox_events"))
         await session.execute(text("DELETE FROM runtime_tasks"))
         await session.commit()
