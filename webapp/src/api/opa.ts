@@ -27,13 +27,13 @@ export async function opaListPolicies(): Promise<OpaPolicy[]> {
   return arr.map((p) => ({ id: p.id, raw: p.raw }));
 }
 
-
 export async function opaGetPolicy(id: string): Promise<string> {
-  const r = await fetch(`/opa-api/v1/policies/${encodeURIComponent(id)}`, { method: "GET" });
+  const r = await fetch(`/opa-api/v1/policies/${encodeURIComponent(id)}`, {
+    method: "GET",
+  });
   await _check(r, `OPA GET /v1/policies/${id} failed`);
   return await r.text();
 }
-
 
 export async function opaUpsertPolicy(id: string, rego: string): Promise<void> {
   const r = await fetch(`/opa-api/v1/policies/${encodeURIComponent(id)}`, {
@@ -45,6 +45,20 @@ export async function opaUpsertPolicy(id: string, rego: string): Promise<void> {
 }
 
 export async function opaDeletePolicy(id: string): Promise<void> {
-  const r = await fetch(`/opa-api/v1/policies/${encodeURIComponent(id)}`, { method: "DELETE" });
+  const r = await fetch(`/opa-api/v1/policies/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
   await _check(r, `OPA DELETE /v1/policies/${id} failed`);
+}
+
+export async function opaEvalUiAllow(input: Record<string, unknown>): Promise<unknown> {
+  const r = await fetch("/opa-api/v1/data/ui/allow", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ input }),
+  });
+  await _check(r, "OPA POST /v1/data/ui/allow failed");
+  return await r.json();
 }

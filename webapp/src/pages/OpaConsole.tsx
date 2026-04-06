@@ -3,15 +3,15 @@ import { opaGetPolicy, opaListPolicies, opaUpsertPolicy, OpaPolicy } from "../ap
 
 export function OpaConsole() {
   const [policies, setPolicies] = useState<OpaPolicy[]>([]);
-  const [selectedId, setSelectedId] = useState<string>("policy/ui.rego");
-  const [raw, setRaw] = useState<string>("");
-  const [busy, setBusy] = useState<boolean>(false);
-  const [err, setErr] = useState<string>("");
+  const [selectedId, setSelectedId] = useState("policy/ui.rego");
+  const [raw, setRaw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   async function refreshList() {
     const data = await opaListPolicies();
     setPolicies(data);
-    // 如果当前选中项不存在了，回退选第一个
+
     if (data.length && !data.find((p) => p.id === selectedId)) {
       setSelectedId(data[0].id);
     }
@@ -21,8 +21,8 @@ export function OpaConsole() {
     setErr("");
     setBusy(true);
     try {
-      const p = await opaGetPolicy(id);
-      setRaw(p.raw || "");
+      const text = await opaGetPolicy(id);
+      setRaw(text || "");
     } finally {
       setBusy(false);
     }
@@ -56,66 +56,96 @@ export function OpaConsole() {
   }
 
   return (
-    <div style={{ display: "flex", height: "100%" }}>
-      {/* left */}
-      <div style={{ width: 320, borderRight: "1px solid var(--border)", overflow: "auto" }}>
-        <div style={{ padding: 12, borderBottom: "1px solid var(--border)", fontWeight: 650 }}>OPA Policies</div>
-
-        {leftItems.map((p) => {
-          const active = p.id === selectedId;
-          return (
-            <button
-              key={p.id}
-              type="button"
-              onClick={() => setSelectedId(p.id)}
-              style={{
-                width: "100%",
-                textAlign: "left",
-                padding: "10px 12px",
-                border: "0",
-                borderBottom: "1px solid var(--border)",
-                background: active ? "rgba(110,168,255,0.12)" : "transparent",
-                color: "var(--text)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontSize: 13, fontWeight: 650 }}>{p.id}</div>
-              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-                {(p.raw || "").split("\n").length} lines
-              </div>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* right */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+    <div
+      style={{
+        height: "calc(100vh - 120px)",
+        display: "grid",
+        gridTemplateColumns: "320px 1fr",
+        gap: 16,
+      }}
+    >
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          overflow: "hidden",
+          background: "var(--panel)",
+        }}
+      >
         <div
           style={{
-            padding: 12,
+            padding: "12px 14px",
+            borderBottom: "1px solid var(--border)",
+            fontWeight: 700,
+          }}
+        >
+          OPA Policies
+        </div>
+
+        <div style={{ overflow: "auto", maxHeight: "100%" }}>
+          {leftItems.map((p) => {
+            const active = p.id === selectedId;
+            return (
+              <button
+                key={p.id}
+                onClick={() => setSelectedId(p.id)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  padding: "10px 12px",
+                  border: "0",
+                  borderBottom: "1px solid var(--border)",
+                  background: active ? "rgba(110,168,255,0.12)" : "transparent",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ fontWeight: 600 }}>{p.id}</div>
+                <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                  {((p.raw || "").split("\n").length || 0)} lines
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid var(--border)",
+          borderRadius: 12,
+          background: "var(--panel)",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
+        }}
+      >
+        <div
+          style={{
+            padding: "12px 14px",
             borderBottom: "1px solid var(--border)",
             display: "flex",
-            justifyContent: "space-between",
             alignItems: "center",
+            justifyContent: "space-between",
             gap: 12,
           }}
         >
-          <div style={{ fontWeight: 650, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
-            Raw — {selectedId}
-          </div>
+          <div style={{ fontWeight: 700 }}>Raw — {selectedId}</div>
 
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" type="button" onClick={() => loadSelected(selectedId)} disabled={busy}>
+            <button className="btn" onClick={() => loadSelected(selectedId)} disabled={busy}>
               Refresh
             </button>
-            <button className="btn" type="button" onClick={onSave} disabled={busy}>
+            <button className="btn btn-primary" onClick={onSave} disabled={busy}>
               Save
             </button>
           </div>
         </div>
 
         {err ? (
-          <div style={{ padding: 12, color: "var(--danger)" }}>{err}</div>
+          <div style={{ padding: "10px 14px", color: "#ff8f8f" }}>
+            {err}
+          </div>
         ) : null}
 
         <textarea
