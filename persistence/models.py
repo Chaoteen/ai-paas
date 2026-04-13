@@ -333,3 +333,124 @@ class WorkflowProductRecord(Base):
             "bound_workflow_version",
         ),
     )
+
+class RecordingSessionRecord(Base):
+    __tablename__ = "recording_sessions"
+
+    recording_session_id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(nullable=False, index=True)
+    distillation_mode: Mapped[str] = mapped_column(nullable=False, default="dialogue_only")
+    current_phase: Mapped[str] = mapped_column(nullable=False, default="capture")
+    title: Mapped[str] = mapped_column(nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    context_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    source_metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    latest_skill_draft_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        Index("idx_recording_sessions_tenant_created_at", "tenant_id", "created_at"),
+        Index("idx_recording_sessions_tenant_status_created_at", "tenant_id", "status", "created_at"),
+        Index("idx_recording_sessions_tenant_source_created_at", "tenant_id", "source_type", "created_at"),
+    )
+
+
+class RecordingActionEventRecord(Base):
+    __tablename__ = "recording_action_events"
+
+    recording_action_event_id: Mapped[str] = mapped_column(primary_key=True)
+    recording_session_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[Optional[str]] = mapped_column(nullable=True)
+    source_event_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    event_timestamp: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    event_type: Mapped[str] = mapped_column(nullable=False, index=True)
+    actor_type: Mapped[str] = mapped_column(nullable=False)
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    source_ref_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "recording_session_id",
+            "sequence_no",
+            name="uq_recording_action_events_session_sequence",
+        ),
+        Index("idx_recording_action_events_session_sequence", "recording_session_id", "sequence_no"),
+        Index(
+            "idx_recording_action_events_tenant_session_created_at",
+            "tenant_id",
+            "recording_session_id",
+            "created_at",
+        ),
+    )
+
+
+class SkillDraftRecord(Base):
+    __tablename__ = "skill_drafts"
+
+    skill_draft_id: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(nullable=False, index=True)
+    recording_session_id: Mapped[Optional[str]] = mapped_column(nullable=True, index=True)
+    previous_skill_draft_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    promoted_skill_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    promoted_skill_version_id: Mapped[Optional[str]] = mapped_column(nullable=True)
+    draft_key: Mapped[str] = mapped_column(nullable=False)
+    draft_version: Mapped[str] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(nullable=False, index=True)
+    name: Mapped[str] = mapped_column(nullable=False)
+    intent_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    distillation_source_type: Mapped[str] = mapped_column(nullable=False)
+    input_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    output_schema_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    draft_definition_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    distillation_notes_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    execution_binding_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    derived_from_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "draft_key",
+            "draft_version",
+            name="uq_skill_drafts_tenant_key_version",
+        ),
+        Index("idx_skill_drafts_tenant_created_at", "tenant_id", "created_at"),
+        Index("idx_skill_drafts_tenant_status_created_at", "tenant_id", "status", "created_at"),
+        Index("idx_skill_drafts_tenant_session_created_at", "tenant_id", "recording_session_id", "created_at"),
+        Index("idx_skill_drafts_tenant_key_created_at", "tenant_id", "draft_key", "created_at"),
+    )

@@ -9,6 +9,8 @@ from fastapi.responses import Response
 from gateway.api.agent_runtime import router as agent_runtime_router
 from gateway.api.generation import router as generation_router
 from gateway.api.health import router as health_router
+from gateway.api.recording_sessions import router as recording_sessions_router
+from gateway.api.skill_drafts import router as skill_drafts_router
 from gateway.api.tasks import router as tasks_router
 from gateway.api.ui import router as ui_router
 from gateway.api.workflow_definitions import router as workflow_definitions_router
@@ -21,7 +23,6 @@ from runtime.queue.task_store import shutdown_task_store_runtime_state
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Warm up the formal shared DB runtime state.
     get_async_engine()
     get_async_session_factory()
     try:
@@ -54,6 +55,8 @@ app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(workflow_definitions_router, prefix="/api/v1")
 app.include_router(workflow_executions_router, prefix="/api/v1")
 app.include_router(workflow_products_router, prefix="/api/v1")
+app.include_router(recording_sessions_router, prefix="/api/v1")
+app.include_router(skill_drafts_router, prefix="/api/v1")
 
 
 @app.get("/api/ui/bootstrap-legacy")
